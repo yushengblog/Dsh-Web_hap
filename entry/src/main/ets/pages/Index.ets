@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3592'
+const BUILD_TAG: string = '构建 v10-01-3602'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -73,6 +73,8 @@ interface ShellBridge {
   setDialog: (v: number) => void;
   getCurLabel: () => string;
   openSwitcher: () => void;
+  // 网页上报真实配色（status bar 双色块用）
+  setTheme: (rail: string, chat: string, border: string) => void;
 }
 
 function mkAddr(name: string, url: string): Address {
@@ -119,6 +121,13 @@ struct Index {
   private visited: boolean = false;
   private webOverlay: boolean = false;
   @State railWidth: number = 280;
+  // 状态栏双色：直接镜像网页里量到的真实颜色，这样深色/浅色主题都能自动跟随
+  // （不再硬编码 #F9FAFC / #FFFFFF / #DBDCDE）
+  @State railColor: string = '#F9FAFB';
+  @State chatColor: string = '#FFFFFF';
+  @State dividerColor: string = '#DBDCDE';
+  private sysBarDark: boolean = false;
+  private sysBarApplied: boolean = false;
   // 网页里是否有"大浮层弹窗"（如 DSH 设置窗）打开；打开时不显示左侧栏的「当前连接情况」行，
   // 否则那个原生浮层会盖在设置窗上面（用户实测反馈）。
   @State dialogOpen: boolean = false;
@@ -240,6 +249,37 @@ struct Index {
       this.injectJs = '';
     }
     this.injectLen = this.injectJs.length;
+  }
+
+  // 系统状态栏图标颜色跟随状态栏底色（底色深 → 图标用白色），否则深色模式下看不见时间/电量
+  applySysBarIcons(railHex: string): void {
+    try {
+      const r = parseInt(railHex.substring(1, 3), 16);
+      const g = parseInt(railHex.substring(3, 5), 16);
+      const b = parseInt(railHex.substring(5, 7), 16);
+      if (isNaN(r) || isNaN(g) || isNaN(b)) {
+        return;
+      }
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      const dark = lum < 0.5;
+      if (this.sysBarApplied && dark === this.sysBarDark) {
+        return;
+      }
+      this.sysBarDark = dark;
+      this.sysBarApplied = true;
+      const ctx = this.getUIContext().getHostContext();
+      window.getLastWindow(ctx).then((w: window.Window) => {
+        try {
+          w.setWindowSystemBarProperties({
+            statusBarContentColor: dark ? '#FFFFFF' : '#000000',
+            navigationBarContentColor: dark ? '#FFFFFF' : '#000000'
+          });
+        } catch (e) {
+        }
+      }).catch(() => {
+      });
+    } catch (e) {
+    }
   }
 
   measureSafeArea(): void {
@@ -1191,21 +1231,77 @@ struct Index {
   }
 
   injectAll(): void {
-    // ① 上报左侧栏实时宽度，让状态栏双色块跟随收起/展开
-    this.js('(function(){if(window.__dshRail){return;}window.__dshRail=1;setInterval(function(){try{var c=document.querySelector("[class*=sidebarCol]");if(c){var w=Math.round(c.getBoundingClientRect().width);if(w>40){window.dshShell.setRailWidth(w);}}}catch(e){}},300);})()');
+    // ① 上报左侧栏宽度 + 网页真实配色（原生状态栏双色块据此上色 → 深色模式自动跟随）
+    //    · sidebarCol 的背景色 = 左块颜色
+    //    · centerCol 的背景色（继承自 frame）= 右块颜色
+    //    · sidebarCol 的 border-right-color 是半透明的 rgba(0,0,0,.12)，
+    //      必须与左块底色做 alpha 合成，才能得到可直接使用的实色分界线
+    //      （浅色下合成结果正是之前硬编码的 #DBDCDE；深色下会自动变成浅色分界线）
+    this.js('(function(){if(window.__dshRail){return;}window.__dshRail=1;'
+      + 'function rgbp(c){var m=c&&c.match(/rgba?\\(([\\d.]+),\\s*([\\d.]+),\\s*([\\d.]+)(?:,\\s*([\\d.]+))?\\)/);'
+      + 'if(!m)return null;return{r:parseFloat(m[1]),g:parseFloat(m[2]),b:parseFloat(m[3]),a:m[4]===undefined?1:parseFloat(m[4])};}'
+      + 'function hx(o){if(!o)return "";function h(x){var v=Math.round(x);if(v<0)v=0;if(v>255)v=255;var s=v.toString(16);return s.length<2?"0"+s:s;}'
+      + 'return "#"+h(o.r)+h(o.g)+h(o.b);}'
+      + 'function effBg(el){var n=el;while(n&&n!==document.documentElement){'
+      + 'var c=getComputedStyle(n).backgroundColor;'
+      + 'if(c&&c!=="rgba(0, 0, 0, 0)"&&c!=="transparent")return c;n=n.parentElement;}return "";}'
+      + 'function blend(fg,bg){if(!fg)return "";if(!bg||fg.a>=1)return hx(fg);'
+      + 'return hx({r:fg.a*fg.r+(1-fg.a)*bg.r,g:fg.a*fg.g+(1-fg.a)*bg.g,b:fg.a*fg.b+(1-fg.a)*bg.b});}'
+      + 'setInterval(function(){try{'
+      + 'var c=document.querySelector("[class*=sidebarCol]");if(!c)return;'
+      + 'var w=Math.round(c.getBoundingClientRect().width);if(w>40)window.dshShell.setRailWidth(w);'
+      + 'var rb=rgbp(effBg(c));'
+      + 'var cc=document.querySelector("[class*=centerCol]");'
+      + 'var cb=cc?rgbp(effBg(cc)):null;'
+      + 'if(!cb){cb=rgbp(effBg(document.body));}'
+      + 'var dv=blend(rgbp(getComputedStyle(c).borderRightColor),rb);'
+      + 'var rs=hx(rb),cs=hx(cb);'
+      + 'if(rs&&cs){window.dshShell.setTheme(rs,cs,dv?dv:rs);}'
+      + '}catch(e){}},400);})()');
     // ② 在 DSH 设置弹窗里、Agent 预设右侧插入「站点」选项卡
     this.js('(function(){if(window.__dshSites){return;}window.__dshSites=1;setInterval(function(){try{var d=document.querySelector("[role=dialog]");if(!d){return;}if(d.querySelector("[data-dsh-sites]")){return;}var bs=d.querySelectorAll("button,[role=tab]");var a=null;for(var i=0;i<bs.length;i++){var x=(bs[i].textContent||"").trim();if(x.indexOf("Agent")===0){a=bs[i];break;}}if(!a||!a.parentElement){return;}var b=document.createElement("button");b.type="button";b.setAttribute("data-dsh-sites","1");b.textContent="\u7ad9\u70b9";b.className=a.className;b.style.marginLeft="4px";b.onclick=function(e){e.stopPropagation();window.dshShell.openSites();};a.parentElement.insertBefore(b,a.nextSibling);}catch(e){}},1200);})()');
     // ③ 自动登录：按当前站点的账号密码填表并提交
     this.js('(function(){if(window.__dshLogin){return;}window.__dshLogin=1;function sv(el,v){try{var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value");if(d&&d.set){d.set.call(el,v);}else{el.value=v;}el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));}catch(e){}}function go(){try{var c=JSON.parse(window.dshShell.getCurrent()||"{}");var g=JSON.parse(window.dshShell.getGroups()||"[]");var a=(g[c.g]&&g[c.g].items)?g[c.g].items[c.i]:null;if(!a||!a.user||!a.pass){return;}var p=document.querySelector("input[type=password]");if(!p){return;}var sc=p.form||document;var ins=sc.querySelectorAll("input");var u=null;for(var i=0;i<ins.length;i++){var t=(ins[i].type||"text").toLowerCase();if(t==="text"||t==="email"||t==="tel"){u=ins[i];break;}}if(u&&!u.value){sv(u,a.user);}if(!p.value){sv(p,a.pass);}var b=sc.querySelector("button[type=submit],input[type=submit]");if(b){b.click();}else if(p.form){p.form.requestSubmit();}}catch(e){}}setTimeout(go,1500);setTimeout(go,3500);})()');
     // ④ 自动点掉首次引导弹窗（"继续"/"我知道了"）：文字匹配 + 按坐标两路并用，多时机重试
     this.js('(function(){if(window.__dshDis2){return;}window.__dshDis2=1;function fire(el){try{el.click();}catch(e){}try{el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}catch(e){}try{var p=el.closest&&el.closest("button,[role=button]");if(p&&p!==el){p.click();}}catch(e){}}function ok(t){return t==="\u7ee7\u7eed"||t==="\u6211\u77e5\u9053\u4e86"||t==="\u5f00\u59cb\u4f7f\u7528";}function collect(root,out){try{var l=root.querySelectorAll("*");for(var i=0;i<l.length;i++){out.push(l[i]);if(l[i].shadowRoot){collect(l[i].shadowRoot,out);}}}catch(e){}}function byText(){try{var out=[];collect(document,out);for(var i=0;i<out.length;i++){var el=out[i];var t=(el.textContent||"").replace(/\\s/g,"");if(t.length===0||t.length>6){continue;}if(!ok(t)){continue;}var r=el.getBoundingClientRect();if(r.width<=1||r.height<=1||r.width>window.innerWidth*0.6){continue;}fire(el);return 1;}}catch(e){}return 0;}function byPoint(){try{var w=window.innerWidth,h=window.innerHeight;var ps=[[0.69,0.68],[0.66,0.68],[0.72,0.68],[0.69,0.72],[0.60,0.68],[0.62,0.72],[0.69,0.64]];for(var i=0;i<ps.length;i++){var el=document.elementFromPoint(Math.round(w*ps[i][0]),Math.round(h*ps[i][1]));if(!el){continue;}if(ok((el.textContent||"").replace(/\\s/g,""))){fire(el);return 1;}var p=el.parentElement;if(p&&ok((p.textContent||"").replace(/\\s/g,""))){fire(p);return 1;}}}catch(e){}return 0;}function tick(){if(byText()){return;}byPoint();}setInterval(tick,600);setTimeout(tick,400);setTimeout(tick,1200);setTimeout(tick,2500);setTimeout(tick,5000);setTimeout(tick,9000);})()');
-    // ⑤ 检测网页里是否有"大浮层弹窗"（DSH 设置窗就是全屏 fixed 层）：有则通知原生
-    //    把左侧栏的「当前连接情况」行藏起来，免得它盖在设置窗上面。
-    this.js('(function(){if(window.__dshDlg){return;}window.__dshDlg=1;setInterval(function(){try{var f=0;var all=document.querySelectorAll("div");for(var i=0;i<all.length;i++){var cs=getComputedStyle(all[i]);if(cs.position!=="fixed"){continue;}var r=all[i].getBoundingClientRect();if(r.width>window.innerWidth*0.6&&r.height>window.innerHeight*0.5){f=1;break;}}window.dshShell.setDialog(f);}catch(e){}},700);})()');
-    // ⑦ 右侧边栏状态上报 + 关闭函数：
-    //    窄屏下右侧工作区展开会占满屏幕，此时"返回"应先收起它，而不是退出 App。
-    //    这两个之前在改排序时被弄丢了，导致 webOverlay 永远 false（返回直接退出 App）。
-    this.js('(function(){if(window.__dshOv){return;}window.__dshOv=1;window.__dshCloseRightPanel=function(){try{var b=document.querySelector("[aria-label=\'收起右侧边栏\']");if(b){b.click();}}catch(e){}};setInterval(function(){try{var b=document.querySelector("[aria-label=\'收起右侧边栏\']");var on=(b&&window.innerWidth<600)?1:0;window.dshShell.setOverlay(on);}catch(e){}},700);})()');
+    // ⑤ 已合并进 ⑦（下面）：弹窗检测统一由 __dshDialogOpen 负责，
+    //    同时用于"侧滑关闭弹窗"和"隐藏左侧栏那行"，避免两个轮询互相覆盖状态。
+    // ⑦ 浮层状态上报 + 关闭函数（右侧边栏 / 网页弹窗）
+    //
+    // ★ 这里有个坑（实测踩到）：
+    //   收起右侧边栏后，[aria-label="收起右侧边栏"] 这个按钮**仍然留在 DOM 里**，
+    //   只是被挪到屏幕外（x > innerWidth）。所以用 querySelector 判断"元素是否存在"
+    //   会永远得到"展开中" —— 于是每次侧滑都去点那个屏外的按钮，
+    //   而它的 handler 是 toggle，结果**把已经收起的右侧栏给打开了**。
+    //   正确做法：判断按钮是否**落在视口内**。
+    //   实测两态：
+    //     展开 → [收起右侧边栏] 在视口内，[打开右侧边栏] 不在 DOM
+    //     收起 → [打开右侧边栏] 在视口内，[收起右侧边栏] 在 DOM 但屏幕外
+    //
+    //   弹窗（设置等）：[role=dialog] / [aria-modal=true]，尺寸较大即为打开；
+    //   关闭方式：点弹窗内的「关闭 / Close」按钮，退路是派发 Escape。
+    this.js('(function(){if(window.__dshOv2){return;}window.__dshOv2=1;'
+      + 'function iv(el){try{if(!el)return false;var r=el.getBoundingClientRect();'
+      + 'return r.width>0&&r.height>0&&r.left<window.innerWidth&&r.right>0&&r.top<window.innerHeight&&r.bottom>0;}catch(e){return false;}}'
+      + 'window.__dshRightOpen=function(){try{'
+      + 'if(iv(document.querySelector("[aria-label=\'打开右侧边栏\']")))return false;'
+      + 'return iv(document.querySelector("[aria-label=\'收起右侧边栏\']"));}catch(e){return false;}};'
+      + 'window.__dshDialogOpen=function(){try{var ds=document.querySelectorAll("[role=dialog],[aria-modal=true]");'
+      + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();if(r.width>120&&r.height>120)return true;}'
+      + 'var al=document.querySelectorAll("div");for(var k=0;k<al.length;k++){'
+      + 'var cs=getComputedStyle(al[k]);if(cs.position!=="fixed")continue;'
+      + 'var r2=al[k].getBoundingClientRect();'
+      + 'if(r2.width>window.innerWidth*0.6&&r2.height>window.innerHeight*0.5)return true;}}catch(e){}return false;};'
+      + 'window.__dshCloseRightPanel=function(){try{if(!window.__dshRightOpen())return;'
+      + 'var b=document.querySelector("[aria-label=\'收起右侧边栏\']");if(b)b.click();}catch(e){}};'
+      + 'window.__dshCloseDialog=function(){try{var ds=document.querySelectorAll("[role=dialog],[aria-modal=true]");'
+      + 'for(var i=0;i<ds.length;i++){var d=ds[i];var r=d.getBoundingClientRect();if(!(r.width>120&&r.height>120))continue;'
+      + 'var bs=d.querySelectorAll("button");for(var j=0;j<bs.length;j++){'
+      + 'var t=(bs[j].getAttribute("aria-label")||bs[j].innerText||"");'
+      + 'if(t.indexOf("关闭")>=0||t.indexOf("Close")>=0){bs[j].click();return;}}}'
+      + 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",code:"Escape",keyCode:27,which:27,bubbles:true}));}catch(e){}};'
+      + 'setInterval(function(){try{window.dshShell.setOverlay(window.__dshRightOpen()?1:0);'
+      + 'window.dshShell.setDialog(window.__dshDialogOpen()?1:0);}catch(e){}},400);})()');
     //    这样它属于网页 DOM，设置弹窗天然盖在它上面；收起导航栏时 DSH 也会让它一起收。
     this.js('(function(){if(window.__dshCur){return;}window.__dshCur=1;setInterval(function(){try{if(!document.getElementById("dsh-curlbl")){var row=document.querySelector("[class*=logoRow]");if(!row||!row.parentElement){return;}var d=document.createElement("div");d.id="dsh-curlbl";d.style.cssText="font-size:11px;color:#8a8a8a;padding:2px 14px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;";d.onclick=function(){try{window.dshShell.openSwitcher();}catch(e){}};row.parentElement.insertBefore(d,row.nextSibling);}var e=document.getElementById("dsh-curlbl");if(e){var t=window.dshShell.getCurLabel();if(t&&t!==e.textContent){e.textContent=t;}}}catch(x){}},1200);})()');
   }
@@ -1251,6 +1347,19 @@ struct Index {
           this.railWidth = w;
         }
       },
+      // 网页把量到的真实配色报上来（#RRGGBB）。深色/浅色主题都能自动跟随。
+      setTheme: (rail: string, chat: string, border: string): void => {
+        if (rail.length === 7 && rail.charAt(0) === '#' && rail !== this.railColor) {
+          this.railColor = rail;
+          this.applySysBarIcons(rail);
+        }
+        if (chat.length === 7 && chat.charAt(0) === '#' && chat !== this.chatColor) {
+          this.chatColor = chat;
+        }
+        if (border.length === 7 && border.charAt(0) === '#' && border !== this.dividerColor) {
+          this.dividerColor = border;
+        }
+      },
       setDialog: (v: number): void => {
         const on = (v === 1);
         if (on !== this.dialogOpen) {
@@ -1286,7 +1395,19 @@ struct Index {
       return true;
     }
     if (this.phase === PHASE_WEB) {
-      // 窄屏下右侧边栏占满屏时，返回先把它收起来（而不是退出 App）
+      // 返回的三级行为（按用户要求）：
+      //   ① 网页里开着弹窗（DSH 设置等）→ 先关弹窗
+      //   ② 右侧边栏展开（窄屏下占满屏）→ 先收起右侧边栏
+      //   ③ 都没有 → 就是"返回主屏/退出 App"
+      // 这两个状态由注入脚本按「元素是否在视口内」上报（只看元素存在会永远为真，见 ⑦ 的注释）。
+      if (this.dialogOpen) {
+        try {
+          this.controller.runJavaScript('window.__dshCloseDialog && window.__dshCloseDialog()');
+        } catch (e) {
+        }
+        this.dialogOpen = false;
+        return true;
+      }
       if (this.webOverlay) {
         try {
           this.controller.runJavaScript('window.__dshCloseRightPanel && window.__dshCloseRightPanel()');
@@ -1295,15 +1416,9 @@ struct Index {
         this.webOverlay = false;
         return true;
       }
-      // 已进网页：按用户要求 —— 侧滑/返回键提示"再按一次退出"，再按一次才真正退出。
-      // （换站点走 DSH 设置里的「站点」；真打不开的白屏由 watchWhiteScreen 自动退回站点页）
-      const t2 = Date.now();
-      if (t2 - this.lastBackTime < 2000) {
-        return false;
-      }
-      this.lastBackTime = t2;
-      promptAction.showToast({ message: '再按一次退出', duration: 2000 });
-      return true;
+      // ③ 主页面：直接退出 App（让系统处理返回 → 回桌面）。
+      //    不再做"再按一次退出"——用户明确要求主页面侧滑就是退出。
+      return false;
     }
     if (this.phase === PHASE_LOADING || this.phase === -1) {
       this.backToPicker();
@@ -2392,7 +2507,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setRailWidth', 'setDialog', 'getCurLabel', 'openSwitcher'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setRailWidth', 'setDialog', 'getCurLabel', 'openSwitcher', 'setTheme'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
@@ -2542,20 +2657,21 @@ struct Index {
         })
 
       // 状态栏区域背景：左块=左侧栏色，右块=对话区色（与网页两块一一对应）
+      // 颜色由注入脚本实时量取并上报（setTheme），因此深色模式会自动跟随。
       // 必须放在 Web 之后：ArkUI 靠声明顺序层叠，放前面会被 Web 盖住
       Row() {
         Row()
           .width(this.railWidth)
           .height('100%')
-          .backgroundColor('#F9FAFC')
+          .backgroundColor(this.railColor)
         Row()
           .width(1)
           .height('100%')
-          .backgroundColor('#DBDCDE')
+          .backgroundColor(this.dividerColor)
         Row()
           .layoutWeight(1)
           .height('100%')
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.chatColor)
       }
       .width('100%')
       .height(this.safeTop)
