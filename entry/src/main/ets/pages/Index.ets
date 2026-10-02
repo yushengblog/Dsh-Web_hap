@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -1356,6 +1356,16 @@ struct Index {
       + 'mb.disabled=!still;mb.textContent=still?"加载更多":"已到末尾";});};'
       + 'ft.appendChild(mb);w.appendChild(ft);}'
       + 'document.body.appendChild(w);}'
+      + 'function base(p){var k=Math.max(p.lastIndexOf("/"),p.lastIndexOf("\\\\"));return k>=0?p.substring(k+1):p;}'
+      // 关掉 DSH 里那个报错的页签（按文件名匹配）。
+      // 用户反馈：打开自建查看器后，原版那个"文件资源服务不可用"的页签还留着，要手动关 —— 这里顺手关掉。
+      + 'function closeDshTab(name){try{var ts=document.querySelectorAll("[role=tab]");'
+      + 'for(var i=0;i<ts.length;i++){var t=ts[i];'
+      + 'if((t.innerText||"").indexOf(name)<0)continue;'
+      + 'var bs=t.querySelectorAll("button");'
+      + 'for(var j=0;j<bs.length;j++){var al=bs[j].getAttribute("aria-label")||"";'
+      + 'var tx=(bs[j].innerText||"").trim();'
+      + 'if(al.indexOf("关闭")>=0||al.indexOf("Close")>=0||tx==="\\u00d7"||tx==="\\u2715"){bs[j].click();return true;}}}}catch(e){}return false;}'
       + 'function getScope(){if(scope)return scope;try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el){scope=el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");}}catch(e){}return scope;}'
@@ -1377,6 +1387,7 @@ struct Index {
       + 'rd(p,1,function(v){if(!v||typeof v.text!=="string")return;'
       + 'var off=(v.offset||1)+(v.lines||0);'
       + 'window.dshShell.dbg("已用自建查看器打开 "+v.absolutePath);'
+      + 'closeDshTab(base(p));'
       + 'open(v.text,v.absolutePath,(v.eof===false)?function(more){'
       + 'rd(p,off,function(v2){if(!v2||typeof v2.text!=="string"){more("",false);return;}more(v2.text,v2.eof===false);});}:null);});return;}'
       + 'if(n>14||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},350);}'
