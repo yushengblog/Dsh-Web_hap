@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -77,6 +77,8 @@ interface ShellBridge {
   log: (m: string) => void;
   openSites: () => void;
   setOverlay: (v: number) => void;
+  // 自建文件查看器的开合状态（返回键/侧滑据此先关它）
+  setFileFix: (v: number) => void;
   setDialog: (v: number) => void;
   getCurLabel: () => string;
   openSwitcher: () => void;
@@ -155,6 +157,8 @@ struct Index {
   // ── 诊断用（排查"手机端文件查看器打不开"）──
   // webConsoleErr：网页控制台里的报错，直接显示在界面上，便于真机取证（不用连电脑）
   @State webConsoleErr: string = '';
+  // 自建文件查看器是否开着
+  @State fileFixOpen: boolean = false;
   // 从安装包读出的版本号（形如 v1.0.12 (1000012)）——用于让用户核对装的是哪一版
   @State verText: string = BUILD_TAG;
   // 网页增强总开关：置 false 可完全停掉所有注入，用来判断"是不是我的注入引起的"
@@ -1300,65 +1304,44 @@ struct Index {
     }, 250);
   }
 
-  // ── 自建文件查看器 ─────────────────────────────────────────────
+  // ── 自建文件查看器 ───────────────────────────────────────────────
   // 背景：手机端 DSH 的文件查看器对 dsh-resource://file/… 一律显示
-  //   "文件资源服务不可用"，而 changes-review 类型资源**正常** ——
-  //   说明 DSH 客户端的 file 资源提供方在本 App 里没注册
-  //   （源码写明它依赖 resources / remote / remote.workspaceFiles 三者）。
-  //   已实测排除：注入脚本、JS 报错、窄屏、缺新 API、UA、插件未加载、Web 组件属性（9 处）。
-  // 方案：不再依赖那个提供方。用户点文件树里的文件后，若 DSH 报"不可用"，
-  //   本脚本用**同源 fetch** 直接调 /api/workspaceFiles/read 取回内容，
-  //   用自己的浮层渲染（带分页、深色适配、关闭按钮）。cookie 由 WebView 自动携带。
-  // 接口契约（实测确认）：
+  //   "文件资源服务不可用"（DSH 客户端的 file 资源提供方在本 App 的 ArkWeb 里没注册），
+  //   而 dsh-resource://changes-review/… 正常 —— 只有 file 这一类提供方缺失。
+  // 已实测排除：注入脚本、JS 报错、窄屏、缺新 API、UA、插件未加载、Web 组件属性（9 处）。
+  // 方案：不依赖那个提供方，改用**同源 fetch** 直调 /api/workspaceFiles/read 取内容自行渲染。
+  //
+  // 会话标识来源（★别再用嗅探）：v1.0.18 钩 window.fetch/XHR 嗅探 workspaceFileScopeId
+  //   **实测抓不到**（本机捕获数为 0）——DSH 客户端在模块加载时就缓存了原始引用。
+  //   改为读 DOM 属性：[data-sidebar-right-session] / [data-conversation-session]。
+  //
+  // 接口契约（实测）：
   //   POST /api/workspaceFiles/read
   //   {"type":"client-request","rpcId":"…","method":"workspaceFiles/read",
   //    "payload":{"args":{"workspaceFileScopeId":"session-…","path":"相对路径",
   //                       "range":{"offset":1,"limit":2000}}}}
   //   → {"result":{"ok":true,"value":{absolutePath,bytes,offset,lines,eof,text}}}
   //   ⚠️ offset 是**行号且最小为 1**（传 0 返回 bad-request）。
+  //
+  // 用户历次反馈对应的改动：
+  //   · 打开后自动关掉原版那个报错页签（不然要手动关）
+  //   · 等得太久 → 点击时**立刻预取**内容，错误一出现马上渲染（轮询 100ms）
+  //   · 界面太素 → 仿原版：等宽字体、路径条、「自动换行」「重新读取」「关闭」按钮
+  //   · 要能侧滑关闭 → 支持右滑 + 系统返回键（经 setFileFix 上报开合状态）
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var scope=null,lastPath=null,timer=null;'
-      + 'function sn(u,o){try{var url=(typeof u==="string")?u:((u&&u.url)||"");'
-      + 'if(url.indexOf("/api/workspaceFiles/")<0)return;var b=o&&o.body;'
-      + 'if(typeof b==="string"){var m=b.match(/"workspaceFileScopeId"\\s*:\\s*"([^"]+)"/);if(m){scope=m[1];}}}catch(e){}}'
-      + 'var of=window.fetch;if(of){window.fetch=function(u,o){sn(u,o);return of.apply(this,arguments);};}'
-      + 'try{var oo=XMLHttpRequest.prototype.open,os=XMLHttpRequest.prototype.send;'
-      + 'XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments);};'
-      + 'XMLHttpRequest.prototype.send=function(b){try{sn(this.__u,{body:b});}catch(e){}return os.apply(this,arguments);};}catch(e){}'
+      + 'var timer=null,lastPath=null,prefetch=null,shown=false;'
+      + 'function getScope(){try{'
+      + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
+      + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
+      + '}catch(e){}return null;}'
+      + 'function base(p){var k=Math.max(p.lastIndexOf("/"),p.lastIndexOf("\\\\"));return k>=0?p.substring(k+1):p;}'
       + 'function dark(){try{var el=document.querySelector("[class*=sidebarCol]")||document.body;'
       + 'var n=el,d=0,c=null;while(n&&n!==document.documentElement&&d<12){d++;'
       + 'var x=getComputedStyle(n).backgroundColor;'
       + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
       + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
       + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
-      + 'function mk(id){var o=document.getElementById(id);if(o&&o.parentNode)o.parentNode.removeChild(o);return o;}'
-      + 'function open(text,path,more){var dk=dark();'
-      + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",hb=dk?"#1c1c20":"#fafafa",sub=dk?"#a6a6ae":"#666666";'
-      + 'mk("dsh-filefix");'
-      + 'var w=document.createElement("div");w.id="dsh-filefix";'
-      + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
-      + 'var h=document.createElement("div");h.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid "+bd+";background:"+hb+";flex:0 0 auto;";'
-      + 'var t=document.createElement("div");t.textContent=path;t.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:"+sub+";";'
-      + 'var b=document.createElement("button");b.textContent="关闭";'
-      + 'b.style.cssText="border:1px solid "+bd+";background:"+bg+";color:"+fg+";border-radius:6px;padding:5px 12px;font-size:13px;";'
-      + 'b.onclick=function(){if(w.parentNode)w.parentNode.removeChild(w);};'
-      + 'h.appendChild(t);h.appendChild(b);'
-      + 'var pre=document.createElement("pre");'
-      + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:12px;line-height:1.55;";'
-      + 'pre.textContent=text;w.appendChild(h);w.appendChild(pre);'
-      + 'if(more){var ft=document.createElement("div");'
-      + 'ft.style.cssText="flex:0 0 auto;padding:8px;text-align:center;border-top:1px solid "+bd+";background:"+hb+";";'
-      + 'var mb=document.createElement("button");mb.textContent="加载更多";'
-      + 'mb.style.cssText="border:1px solid "+bd+";background:"+bg+";color:"+fg+";border-radius:6px;padding:7px 16px;font-size:13px;";'
-      + 'mb.onclick=function(){mb.disabled=true;mb.textContent="加载中…";'
-      + 'more(function(extra,still){pre.textContent=pre.textContent+extra;'
-      + 'mb.disabled=!still;mb.textContent=still?"加载更多":"已到末尾";});};'
-      + 'ft.appendChild(mb);w.appendChild(ft);}'
-      + 'document.body.appendChild(w);}'
-      + 'function base(p){var k=Math.max(p.lastIndexOf("/"),p.lastIndexOf("\\\\"));return k>=0?p.substring(k+1):p;}'
-      // 关掉 DSH 里那个报错的页签（按文件名匹配）。
-      // 用户反馈：打开自建查看器后，原版那个"文件资源服务不可用"的页签还留着，要手动关 —— 这里顺手关掉。
       + 'function closeDshTab(name){try{var ts=document.querySelectorAll("[role=tab]");'
       + 'for(var i=0;i<ts.length;i++){var t=ts[i];'
       + 'if((t.innerText||"").indexOf(name)<0)continue;'
@@ -1366,80 +1349,80 @@ struct Index {
       + 'for(var j=0;j<bs.length;j++){var al=bs[j].getAttribute("aria-label")||"";'
       + 'var tx=(bs[j].innerText||"").trim();'
       + 'if(al.indexOf("关闭")>=0||al.indexOf("Close")>=0||tx==="\\u00d7"||tx==="\\u2715"){bs[j].click();return true;}}}}catch(e){}return false;}'
-      + 'function getScope(){if(scope)return scope;try{'
-      + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
-      + 'if(el){scope=el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");}}catch(e){}return scope;}'
       + 'function rd(path,offset,cb){var sc=getScope();'
-      + 'if(!sc){window.dshShell.dbg("自建查看器：页面里找不到会话标识，无法读取");return;}'
+      + 'if(!sc){cb(null);return;}'
       + 'var body=JSON.stringify({type:"client-request",rpcId:"ff-"+Date.now()+"-"+Math.random().toString(36).slice(2),'
       + 'method:"workspaceFiles/read",payload:{args:{workspaceFileScopeId:sc,path:path,range:{offset:offset,limit:2000}}}});'
       + 'fetch("/api/workspaceFiles/read",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:body})'
       + '.then(function(r){return r.json();})'
-      + '.then(function(j){var v=j&&j.result&&j.result.value;'
-      + 'if(!v){var e=(j&&j.result&&j.result.error)||{};window.dshShell.dbg("自建查看器读取失败："+(e.code||"")+" "+(e.message||""));return;}cb(v);})'
-      + '.catch(function(e){window.dshShell.dbg("自建查看器异常："+e);});}'
+      + '.then(function(j){var v=j&&j.result&&j.result.value;cb(v||null);})'
+      + '.catch(function(e){cb(null);});}'
+      + 'function close(){var o=document.getElementById("dsh-filefix");'
+      + 'if(o&&o.parentNode)o.parentNode.removeChild(o);'
+      + 'if(shown){shown=false;try{window.dshShell.setFileFix(0);}catch(e){}}}'
+      + 'window.__dshCloseFileFix=close;'
+      + 'function render(v,path){'
+      + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
+      + 'var dk=dark();'
+      + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
+      + 'hb=dk?"#1b1b1c":"#f9fafb",sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5";'
+      + 'var mono="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";'
+      + 'var w=document.createElement("div");w.id="dsh-filefix";'
+      + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
+      + 'var bar=document.createElement("div");'
+      + 'bar.style.cssText="display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid "+bd+";background:"+hb+";flex:0 0 auto;";'
+      + 'var pth=document.createElement("div");pth.textContent=(v&&v.absolutePath)||path;'
+      + 'pth.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:"+sub+";font-family:"+mono+";";'
+      + 'function mkbtn(label,on){var b=document.createElement("button");b.textContent=label;'
+      + 'b.style.cssText="border:1px solid "+bd+";background:"+bt+";color:"+fg+";border-radius:7px;padding:5px 11px;font-size:12.5px;white-space:nowrap;";'
+      + 'b.onclick=on;return b;}'
+      + 'var pre=document.createElement("pre");'
+      + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:"+mono+";font-size:12.5px;line-height:1.65;";'
+      + 'pre.textContent=(v&&typeof v.text==="string")?v.text:"（读取失败）";'
+      + 'var wrapped=true;'
+      + 'var wrapBtn=mkbtn("自动换行",function(){wrapped=!wrapped;'
+      + 'pre.style.whiteSpace=wrapped?"pre-wrap":"pre";pre.style.wordBreak=wrapped?"break-word":"normal";'
+      + 'pre.style.overflowX=wrapped?"hidden":"auto";wrapBtn.style.color=wrapped?fg:sub;});'
+      + 'var reBtn=mkbtn("重新读取",function(){pre.textContent="读取中…";'
+      + 'rd(path,1,function(v2){if(!v2){pre.textContent="（读取失败）";return;}'
+      + 'pre.textContent=typeof v2.text==="string"?v2.text:"（读取失败）";'
+      + 'pth.textContent=v2.absolutePath||path;});});'
+      + 'var clBtn=mkbtn("关闭",close);'
+      + 'bar.appendChild(pth);bar.appendChild(wrapBtn);bar.appendChild(reBtn);bar.appendChild(clBtn);'
+      + 'w.appendChild(bar);w.appendChild(pre);'
+      + 'if(v&&v.eof===false){var ft=document.createElement("div");'
+      + 'ft.style.cssText="flex:0 0 auto;padding:9px;text-align:center;border-top:1px solid "+bd+";background:"+hb+";";'
+      + 'var mb=mkbtn("加载更多",function(){mb.disabled=true;mb.textContent="加载中…";'
+      + 'var off=(v.offset||1)+(v.lines||0);'
+      + 'rd(path,off,function(v2){mb.disabled=false;mb.textContent="加载更多";'
+      + 'if(!v2||typeof v2.text!=="string")return;pre.textContent=pre.textContent+v2.text;'
+      + 'v.offset=v2.offset;v.lines=v2.lines;v.eof=v2.eof;});});'
+      + 'ft.appendChild(mb);w.appendChild(ft);}'
+      + 'var sx=null,sy=null;'
+      + 'w.addEventListener("touchstart",function(e){var t=e.touches[0];sx=t.clientX;sy=t.clientY;},{passive:true});'
+      + 'w.addEventListener("touchend",function(e){if(sx===null)return;var t=e.changedTouches[0];'
+      + 'var dx=t.clientX-sx,dy=t.clientY-sy;sx=null;'
+      + 'if(dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
+      + 'document.body.appendChild(w);'
+      + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
+      + 'function show(path){var go=function(v){render(v,path);closeDshTab(base(path));};'
+      + 'if(prefetch){var pv=prefetch;prefetch=null;go(pv);}else{rd(path,1,go);}}'
       + 'function findErr(){try{var ds=document.querySelectorAll("[data-textpreview-state=loading]");'
       + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();'
       + 'if(r.width>0&&r.height>0&&(ds[i].innerText||"").indexOf("不可用")>=0)return true;}}catch(e){}return false;}'
-      + 'function watch(){if(timer){clearInterval(timer);}var n=0;'
+      + 'function watch(){if(timer)clearInterval(timer);var n=0;'
       + 'timer=setInterval(function(){n++;'
-      + 'if(findErr()&&lastPath){clearInterval(timer);timer=null;var p=lastPath;'
-      + 'rd(p,1,function(v){if(!v||typeof v.text!=="string")return;'
-      + 'var off=(v.offset||1)+(v.lines||0);'
-      + 'window.dshShell.dbg("已用自建查看器打开 "+v.absolutePath);'
-      + 'closeDshTab(base(p));'
-      + 'open(v.text,v.absolutePath,(v.eof===false)?function(more){'
-      + 'rd(p,off,function(v2){if(!v2||typeof v2.text!=="string"){more("",false);return;}more(v2.text,v2.eof===false);});}:null);});return;}'
-      + 'if(n>14||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},350);}'
+      + 'if(findErr()&&lastPath){clearInterval(timer);timer=null;show(lastPath);return;}'
+      + 'if(n>25||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},100);}'
       + 'document.addEventListener("click",function(e){try{var n=e.target;while(n&&n!==document){'
       + 'if(n.getAttribute&&n.getAttribute("data-files-entry")==="file"&&n.getAttribute("data-files-path")){'
-      + 'lastPath=n.getAttribute("data-files-path");watch();break;}n=n.parentElement;}}catch(x){}},true);'
+      + 'lastPath=n.getAttribute("data-files-path");prefetch=null;'
+      + 'rd(lastPath,1,function(v){prefetch=v;});'
+      + 'watch();break;}n=n.parentElement;}}catch(x){}},true);'
       + '})()');
   }
+
   injectAll(): void {
-    // 诊断②：上报引擎版本 + 关键 Web API 支持情况。
-    // 用途：手机端「文件资源服务不可用」在 Chromium(Edge) 上正常、在本 App 的 ArkWeb 上失败，
-    //   需要知道 ArkWeb 到底缺哪个 API —— 这类缺失常被 .catch(()=>{}) 吞掉，表现为"静默失败、请求根本不发"。
-    this.js('(function(){if(window.__dshUA){return;}window.__dshUA=1;'
-      + 'setTimeout(function(){try{var o=[];'
-      + 'function t(n,f){try{o.push(n+"="+(f()?"Y":"N"));}catch(e){o.push(n+"=E");}}'
-      + 'o.push("UA:"+(navigator.userAgent||""));'
-      + 't("AS.timeout",function(){return typeof AbortSignal!=="undefined"&&!!AbortSignal.timeout;});'
-      + 't("AS.any",function(){return typeof AbortSignal!=="undefined"&&!!AbortSignal.any;});'
-      + 't("sClone",function(){return typeof structuredClone==="function";});'
-      + 't("hasOwn",function(){return typeof Object.hasOwn==="function";});'
-      + 't("at",function(){return typeof [].at==="function";});'
-      + 't("canParse",function(){return typeof URL.canParse==="function";});'
-      + 't("uuid",function(){return !!(window.crypto&&window.crypto.randomUUID);});'
-      + 't("rIC",function(){return typeof requestIdleCallback==="function";});'
-      + 't("Offscr",function(){return typeof OffscreenCanvas==="function";});'
-      + 't("idb",function(){return !!window.indexedDB;});'
-      + 't("ls",function(){return !!window.localStorage;});'
-      + 'window.dshShell.dbg(o.join(" | "));}catch(e){'
-      + 'try{window.dshShell.dbg("probe err "+e);}catch(x){}}},1500);})()');    // ── 诊断注入（不受 INJECT_ENABLED 影响）──
-    // 目的：查清"手机端点文件后为什么一个 stat 请求都不发"。
-    // 依据（来自 DSH 客户端源码）：点文件 → openResource(fileAddressFor(session,root,path))
-    //   → 侧栏开标签 → 资源解析器把 dsh-resource:// 地址解析成 workspaceFileScope+path
-    //   → 才发 workspaceFiles/stat。解析不到就显示"文件资源服务不可用"且不发请求。
-    // 这里把"点的是哪个路径 / 现在有哪些页签 / 文件树根 / 是否有失败码"打回原生红条。
-    this.js('(function(){if(window.__dshDbg){return;}window.__dshDbg=1;'
-      + 'document.addEventListener("click",function(e){try{'
-      + 'var n=e.target;while(n&&n!==document){if(n.getAttribute&&n.getAttribute("data-files-path")){'
-      + 'window.__dshLastPath=n.getAttribute("data-files-path");break;}n=n.parentElement;}}catch(x){}},true);'
-      + 'setInterval(function(){try{'
-      + 'var st=document.querySelector("[data-textpreview-state=loading]");'
-      + 'if(!st)return;'
-      + 'var ts=document.querySelectorAll("[role=tab]"),ls=[];'
-      + 'for(var i=0;i<ts.length;i++){var x=(ts[i].innerText||"").trim();if(x)ls.push(x);}'
-      + 'var r=document.querySelector("[data-files-root]");'
-      + 'var c=document.querySelector("[data-files-code]");'
-      + 'var u=document.querySelector("[data-textpreview-url]");'
-      + 'window.dshShell.dbg("点:"+(window.__dshLastPath||"-")'
-      + '+" | 页签:"+ls.join("/")'
-      + '+" | root:"+(r?r.getAttribute("data-files-root"):"-")'
-      + '+" | 失败码:"+(c?c.getAttribute("data-files-code"):"-")'
-      + '+" | 预览url:"+(u?u.getAttribute("data-textpreview-url"):"-"));'
-      + '}catch(e){}},1500);})()');
     // 自建文件查看器：始终启用（这是"文件打不开"的兜底，不受诊断开关影响）
     this.injectFileFix();
     if (!this.injectEnabled) {
@@ -1612,6 +1595,10 @@ struct Index {
       setOverlay: (v: number): void => {
         this.webOverlay = (v === 1);
       },
+      // 自建文件查看器上报开合状态（返回键/侧滑据此先关它）
+      setFileFix: (v: number): void => {
+        this.fileFixOpen = (v === 1);
+      },
       // 网页只上报"当前是不是深色"（由侧栏底色亮度算出）。
       // 不再上报具体配色，也不再上报侧栏宽度 —— 状态栏已改成一条纯色条。
       setDark: (v: number): void => {
@@ -1671,6 +1658,16 @@ struct Index {
       //   ③ 都没有 → 两段式退出 App（第一次提示"再按一次退出"）
       // 这两个状态由注入脚本按「元素是否在视口内 + innerWidth」上报
       // （只看元素是否存在会永远为真，见 ⑦ 的注释）。
+      // ⓪ 自建文件查看器开着 → 最先关它
+      //    用户要求：侧滑/返回键能关掉查看器。开合状态由查看器脚本经 setFileFix 上报。
+      if (this.fileFixOpen) {
+        try {
+          this.controller.runJavaScript('window.__dshCloseFileFix && window.__dshCloseFileFix()');
+        } catch (e) {
+        }
+        this.fileFixOpen = false;
+        return true;
+      }
       if (this.dialogOpen) {
         try {
           this.controller.runJavaScript('window.__dshCloseDialog && window.__dshCloseDialog()');
@@ -2787,7 +2784,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
@@ -2952,41 +2949,6 @@ struct Index {
           }
         })
 
-      // 诊断条：网页控制台报错（有才显示，点「清除」可关）
-      // 放在最后 → 层级最高，一定看得见；用来在真机上直接取证，不用连电脑。
-      if (this.webConsoleErr.length > 0) {
-        Column({ space: 3 }) {
-          Row({ space: 8 }) {
-            Text('网页报错')
-              .fontSize(10)
-              .fontColor('#FFFFFF')
-              .backgroundColor('#CC0000')
-              .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-              .borderRadius(4)
-            Text('清除')
-              .fontSize(11)
-              .fontColor('#BBD0FF')
-              .onClick(() => {
-                this.webConsoleErr = '';
-              })
-            Blank()
-          }
-          .width('100%')
-
-          Text(this.webConsoleErr)
-            .fontSize(10)
-            .fontColor('#FFFFFF')
-            .width('100%')
-        }
-        .width('100%')
-        .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-        .backgroundColor('#99000000')
-        .margin({ top: this.safeTop })
-        // ★ 触摸穿透：诊断条只是"显示信息"，绝不能挡住下面的网页。
-        //   之前它会挡住左侧栏切换按钮，用户点不到（用户反馈）。
-        //   HitTestMode.Transparent = 自己照常响应，**同时**把事件放给下层的兄弟节点。
-        .hitTestBehavior(HitTestMode.Transparent)
-      }
 
       // 状态栏区域**不再单独画色条**（用户定稿）。
       // 窗口是 setWindowLayoutFullScreen(true)，所以状态栏那一条露出来的
