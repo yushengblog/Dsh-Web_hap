@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3722'
+const BUILD_TAG: string = '构建 v10-01-3732'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -2741,7 +2741,7 @@ struct Index {
               this.watchWhiteScreen();
               this.visited = true;
               this.saveStore();
-              this.clearWebHistory();
+              // [诊断临时移除] this.clearWebHistory();
             }
           }
         })
@@ -2770,7 +2770,7 @@ struct Index {
               this.watchWhiteScreen();
             this.visited = true;
             this.saveStore();
-            this.clearWebHistory();
+              // [诊断临时移除] this.clearWebHistory();
           }
           // 上报左侧栏实时宽度，让状态栏双色块跟随（收起/展开都要跟）
           this.injectAll();
@@ -2811,7 +2811,7 @@ struct Index {
         .height('100%')
         // 不再向上扩展安全区：向上扩展会让网页内容整体上顶（logo 会被状态栏块盖住），
       // 状态栏那一块改由上面的双色 Row 负责填充。
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        // [诊断临时移除] .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
       .padding({ top: this.safeTop })
       }
       .width('100%')
@@ -2820,42 +2820,42 @@ struct Index {
       //（表现就是 logo 和侧栏切换按钮"消失"）。这是布局级下移，和 Web.padding 不同。
       .padding({ top: this.safeTop })
 
-      // 隐藏的探测 Web（后台依次真加载每条地址）
-      Web({ src: EMPTY_URL, controller: this.probeController })
-        .javaScriptAccess(true)
-        .width(1)
-        .height(1)
-        .opacity(0)
-        .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
-          if (event) {
-            const g = this.groups[this.probeG];
-            const a = (g && g.items && g.items[this.probeI]) ? g.items[this.probeI] : null;
-            if (a && a.user && a.user.length > 0) {
-              event.handler.confirm(a.user, a.pass);
-            } else {
-              this.lastErr = 'AUTH-NOCRED';
-              event.handler.cancel();
-            }
-          }
-          return true;
-        })
-        .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
-          if (event) {
-            this.probeSslIgnored = true;
-            event.handler.handleConfirm();
-          }
-        })
-        .onPageEnd(() => {
-          this.onProbeEnd();
-        })
-        .onErrorReceive((event) => {
-          if (event) {
-            const c = event.error.getErrorCode();
-            if (c !== -3) {
-              this.probeHadError = true;
-            }
-          }
-        })
+        // [诊断临时移除] // 隐藏的探测 Web（后台依次真加载每条地址）
+        // [诊断临时移除] Web({ src: EMPTY_URL, controller: this.probeController })
+        // [诊断临时移除] .javaScriptAccess(true)
+        // [诊断临时移除] .width(1)
+        // [诊断临时移除] .height(1)
+        // [诊断临时移除] .opacity(0)
+        // [诊断临时移除] .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
+        // [诊断临时移除] if (event) {
+        // [诊断临时移除] const g = this.groups[this.probeG];
+        // [诊断临时移除] const a = (g && g.items && g.items[this.probeI]) ? g.items[this.probeI] : null;
+        // [诊断临时移除] if (a && a.user && a.user.length > 0) {
+        // [诊断临时移除] event.handler.confirm(a.user, a.pass);
+        // [诊断临时移除] } else {
+        // [诊断临时移除] this.lastErr = 'AUTH-NOCRED';
+        // [诊断临时移除] event.handler.cancel();
+        // [诊断临时移除] }
+        // [诊断临时移除] }
+        // [诊断临时移除] return true;
+        // [诊断临时移除] })
+        // [诊断临时移除] .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
+        // [诊断临时移除] if (event) {
+        // [诊断临时移除] this.probeSslIgnored = true;
+        // [诊断临时移除] event.handler.handleConfirm();
+        // [诊断临时移除] }
+        // [诊断临时移除] })
+        // [诊断临时移除] .onPageEnd(() => {
+        // [诊断临时移除] this.onProbeEnd();
+        // [诊断临时移除] })
+        // [诊断临时移除] .onErrorReceive((event) => {
+        // [诊断临时移除] if (event) {
+        // [诊断临时移除] const c = event.error.getErrorCode();
+        // [诊断临时移除] if (c !== -3) {
+        // [诊断临时移除] this.probeHadError = true;
+        // [诊断临时移除] }
+        // [诊断临时移除] }
+        // [诊断临时移除] })
 
       // 诊断条：网页控制台报错（有才显示，点「清除」可关）
       // 放在最后 → 层级最高，一定看得见；用来在真机上直接取证，不用连电脑。
@@ -2944,3 +2944,5 @@ struct Index {
     })
   }
 }
+
+// [诊断临时移除] 以上三处均为定位"文件资源服务不可用"的临时改动，定位后恢复。
