@@ -1304,31 +1304,22 @@ struct Index {
     }, 250);
   }
 
-  // ── 自建文件查看器 ───────────────────────────────────────────────
+  // ── 自建文件查看器（纯文本 + Markdown 渲染）──────────────────────
   // 背景：手机端 DSH 的文件查看器对 dsh-resource://file/… 一律显示
   //   "文件资源服务不可用"（DSH 客户端的 file 资源提供方在本 App 的 ArkWeb 里没注册）。
   // 方案：不依赖那个提供方，改用**同源 fetch** 直调 /api/workspaceFiles/read 取内容自行渲染。
   //
-  // ★触发方式：**由"错误状态本身"触发**，不认入口。
-  //   因为打开文件不止一个入口（文件树 / 聊天提及 / 变更审查里的「打开文件」…），
-  //   它们都会走 file 地址、都会报错，但只有文件树那行有 [data-files-entry] 属性。
-  //   旧实现只监听文件树点击 → 别的入口"点了没反应"（用户报的 bug）。
+  // ★触发方式：**由"错误状态本身"触发**，不认入口
+  //   （文件树 / 聊天提及 / 变更审查「打开文件」都会走 file 地址、都会报错，
+  //     但只有文件树那行有 [data-files-entry] 属性 —— 旧实现只监听它，别的入口就"点了没反应"）。
   //
-  // ★路径确定方式（v1.1.2 修正）：**收集所有候选，逐个试 read，取第一个成功的**。
-  //   原因：右侧栏可同时挂多个页签，`[data-path-label]` 会有**多个值** ——
-  //   实测点变更审查卡片会开出「第 N 轮改动」页签，此时该标签是
-  //   `dsh-shell/README.txt`（变更审查那个页签的），而不是文件页签的。
-  //   光取"最后一个"会取错，于是表现为"非得先在文件树里点一次才行"（用户报的 bug）。
-  //   候选来源（去重后按序试）：
-  //     ① 所有 [data-path-label] 里"像路径"的值（含目录分隔符）
-  //     ② [data-textpreview-url] 里 URL 编码的路径（仅在成功态存在，聊备一格）
-  //     ③ 文件树点击记录的相对路径（[data-files-entry=file] 的 data-files-path）
-  //     ④ 页签标题里的文件名（兜底，只对工作区根目录下的文件有效）
-  //   全部试失败时，弹一个诊断浮层把"看到了什么"列出来，便于把截图发给 AI 定位。
+  // ★路径确定：**收集全部候选，逐个试 read，取第一个成功的**
+  //   （报错态下文件页签的 [data-path-label] 可能是空的，只取"最后一个"会取到空）。
+  //   候选：① 所有 [data-path-label] 里像路径的值 ② [data-textpreview-url] 里 URL 编码的路径
+  //         ③ 文件树点击记录 ④ 页签标题里的文件名。全失败时弹诊断浮层列出看到的东西。
   //
-  // 会话标识来源（★别再嗅探）：钩 window.fetch/XHR 实测**捕获数为 0**
-  //   ——DSH 客户端在模块加载时就缓存了原始引用。改为读 DOM：
-  //   [data-sidebar-right-session] / [data-conversation-session]。
+  // 会话标识来源：读 DOM（[data-sidebar-right-session] / [data-conversation-session]）。
+  //   ★钩 window.fetch/XHR 嗅探实测**捕获数为 0** —— 客户端在模块加载时就缓存了原始引用。
   //
   // 接口契约（实测）：
   //   POST /api/workspaceFiles/read
@@ -1338,12 +1329,23 @@ struct Index {
   //   → {"result":{"ok":true,"value":{absolutePath,bytes,offset,lines,eof,text}}}
   //   ⚠️ offset 是**行号且最小为 1**（传 0 返回 bad-request）。
   //
+  // ★Markdown 查看（本次新增）：
+  //   .md / .markdown 默认按 **Markdown 渲染**，其余文件默认纯文本；
+  //   工具条上可随时切换（按钮文字就是当前状态，一眼看得出 —— 只靠颜色深浅用户看不出，踩过）。
+  //   渲染器是**自己写的轻量实现**，不依赖任何 CDN / 外部库
+  //   （本 App 面向内网自建系统，可能上不了外网）。
+  //   支持：标题 / 粗体 / 斜体 / 删除线 / 行内代码 / 代码块 / 有序无序列表 /
+  //         引用块 / 分隔线 / 表格 / 链接 / 图片。
+  //   · 相对路径的图片不渲染（会 404），只显示替代文字与路径
+  //   · 链接**不跳转**（点击被拦下）—— 否则 WebView 会离开 DSH 页面，用户就"回不来"了
+  //
   // 其他历次反馈对应的改动：
-  //   · 打开后自动关掉原版那个报错页签（用 data-dockkit-tab-close；按"选中页签"优先匹配，
-  //     免得误关同名的变更审查页签）
-  //   · 等得太久 → 文件树点击时**立刻预取**内容（轮询 100ms）
-  //   · 界面太素 → 仿原版：等宽字体、路径条、「自动换行/取消换行」「重新读取」「关闭」
+  //   · 打开后自动关掉原版那个报错页签（★用"从错误元素往上爬 data-dockkit-content → 点
+  //     data-dockkit-tab-close"精确命中，与标题无关；别用 [aria-selected=true]，它会匹配到
+  //     会话行等无关元素而认错目标）
+  //   · 等得太久 → 文件树点击时立刻预取（轮询 100ms）
   //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
+  //   · 关闭查看器时也再收一次报错页签，并延迟 350ms 重试
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
       + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="";'
@@ -1358,8 +1360,96 @@ struct Index {
       + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
       + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
       + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
-      // 精确关掉"显示着错误"的那个页签：从错误元素往上找 data-dockkit-content 拿到页签 id，
-      // 再点对应的 data-dockkit-tab-close —— 与页签标题无关，最可靠。
+      // ── Markdown 渲染（自写轻量实现，无外部依赖）──
+      + 'function mdEsc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}'
+      + 'function mdInline(s){'
+      + 's=mdEsc(s);'
+      + 's=s.replace(/`([^`]+)`/g,function(m,a){return "<code>"+a+"</code>";});'
+      + 's=s.replace(/!\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)/g,function(m,alt,url){'
+      + 'if(/^https?:\\/\\//i.test(url))return "<img src=\\""+url+"\\" alt=\\""+alt+"\\">";'
+      + 'return "<span class=\\"md-img\\">[图片] "+alt+" ("+url+")</span>";});'
+      + 's=s.replace(/\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)/g,function(m,txt,url){'
+      + 'return "<a href=\\""+url+"\\" title=\\""+url+"\\">"+txt+"</a>";});'
+      + 's=s.replace(/\\*\\*([^*]+)\\*\\*/g,"<strong>$1</strong>");'
+      + 's=s.replace(/__([^_]+)__/g,"<strong>$1</strong>");'
+      + 's=s.replace(/~~([^~]+)~~/g,"<del>$1</del>");'
+      + 's=s.replace(/(^|[^*])\\*([^*\\n]+)\\*/g,"$1<em>$2</em>");'
+      + 's=s.replace(/(^|[^_])_([^_\\n]+)_/g,"$1<em>$2</em>");'
+      + 'return s;}'
+      + 'function mdRow(l){return l.replace(/^\\s*\\|/,"").replace(/\\|\\s*$/,"").split("|").map(function(x){return x.trim();});}'
+      + 'function mdToHtml(src){'
+      + 'var lines=String(src).split("\\n"),out=[],i=0;'
+      + 'while(i<lines.length){var ln=lines[i];'
+      // 代码围栏
+      + 'var f=ln.match(/^\\s*(`{3,}|~{3,})\\s*([\\w+#-]*)\\s*$/);'
+      + 'if(f){var ch=f[1].charAt(0),lang=f[2]||"",buf=[];i++;'
+      + 'while(i<lines.length&&lines[i].indexOf(ch+ch+ch)<0){buf.push(lines[i]);i++;}'
+      + 'i++;'
+      + 'out.push("<pre class=\\"md-code\\" data-lang=\\""+mdEsc(lang)+"\\"><code>"+mdEsc(buf.join("\\n"))+"</code></pre>");continue;}'
+      // 标题
+      + 'var h=ln.match(/^(#{1,6})\\s+(.*)$/);'
+      + 'if(h){var lv=h[1].length;out.push("<h"+lv+">"+mdInline(h[2])+"</h"+lv+">");i++;continue;}'
+      // 分隔线
+      + 'if(/^\\s*([-*_])\\s*\\1\\s*\\1[-\\s*_]*$/.test(ln)){out.push("<hr>");i++;continue;}'
+      // 引用块
+      + 'if(/^\\s*>/.test(ln)){var qb=[];'
+      + 'while(i<lines.length&&/^\\s*>/.test(lines[i])){qb.push(lines[i].replace(/^\\s*>\\s?/,""));i++;}'
+      + 'out.push("<blockquote>"+mdToHtml(qb.join("\\n"))+"</blockquote>");continue;}'
+      // 表格
+      + 'if(ln.indexOf("|")>=0&&i+1<lines.length&&/^\\s*\\|?[\\s:|-]+\\|[\\s:|-]*$/.test(lines[i+1])&&lines[i+1].indexOf("-")>=0){'
+      + 'var hd=mdRow(ln);i+=2;var rows=[];'
+      + 'while(i<lines.length&&lines[i].indexOf("|")>=0&&lines[i].trim()!==""){rows.push(mdRow(lines[i]));i++;}'
+      + 'var t="<table><thead><tr>",c1;'
+      + 'for(c1=0;c1<hd.length;c1++)t+="<th>"+mdInline(hd[c1])+"</th>";'
+      + 't+="</tr></thead><tbody>";'
+      + 'for(var r1=0;r1<rows.length;r1++){t+="<tr>";'
+      + 'for(c1=0;c1<hd.length;c1++)t+="<td>"+mdInline(rows[r1][c1]||"")+"</td>";t+="</tr>";}'
+      + 'out.push(t+"</tbody></table>");continue;}'
+      // 列表
+      + 'if(/^\\s*([-*+]|\\d+[.)])\\s+/.test(ln)){'
+      + 'var ord=/^\\s*\\d+[.)]\\s+/.test(ln),its=[];'
+      + 'while(i<lines.length&&/^\\s*([-*+]|\\d+[.)])\\s+/.test(lines[i])){'
+      + 'its.push(lines[i].replace(/^\\s*([-*+]|\\d+[.)])\\s+/,""));i++;}'
+      + 'var lt=ord?"ol":"ul",ls="<"+lt+">";'
+      + 'for(var k1=0;k1<its.length;k1++)ls+="<li>"+mdInline(its[k1])+"</li>";'
+      + 'out.push(ls+"</"+lt+">");continue;}'
+      // 空行
+      + 'if(/^\\s*$/.test(ln)){i++;continue;}'
+      // 段落
+      + 'var pb=[];'
+      + 'while(i<lines.length&&!/^\\s*$/.test(lines[i])'
+      + '&&!/^\\s*(#{1,6}\\s|>|([-*+]|\\d+[.)])\\s)/.test(lines[i])'
+      + '&&!/^\\s*(`{3,}|~{3,})/.test(lines[i])){pb.push(lines[i]);i++;}'
+      // ★先逐行转义再拼 <br>。若写成 mdInline(pb.join("<br>"))，
+      //   mdInline 开头的转义会把刚拼的 <br> 也转义掉，页面上就会看到字面的 "<br>"（踩过）。
+      + 'out.push("<p>"+pb.map(mdInline).join("<br>")+"</p>");}'
+      + 'return out.join("\\n");}'
+      // 查看器内的样式（作用域限定在 #dsh-filefix 内）
+      + 'function css(dk){var bd=dk?"#2e2e34":"#e5e5e5",sub=dk?"#a6a6ae":"#6b6b6b",'
+      + 'cb=dk?"#1b1b1c":"#f6f7f9",lnk=dk?"#8fb6ff":"#1a4fb4",qt=dk?"#9aa0a6":"#6b6b6b";'
+      + 'return "#dsh-filefix .md{font-size:14px;line-height:1.75;word-break:break-word;}"'
+      + '+ "#dsh-filefix .md h1,#dsh-filefix .md h2,#dsh-filefix .md h3,#dsh-filefix .md h4{margin:18px 0 10px;line-height:1.35;font-weight:600;}"'
+      + '+ "#dsh-filefix .md h1{font-size:22px;border-bottom:1px solid "+bd+";padding-bottom:8px;}"'
+      + '+ "#dsh-filefix .md h2{font-size:19px;border-bottom:1px solid "+bd+";padding-bottom:6px;}"'
+      + '+ "#dsh-filefix .md h3{font-size:16px;}"'
+      + '+ "#dsh-filefix .md h4,#dsh-filefix .md h5,#dsh-filefix .md h6{font-size:14px;}"'
+      + '+ "#dsh-filefix .md p{margin:10px 0;}"'
+      + '+ "#dsh-filefix .md ul,#dsh-filefix .md ol{margin:10px 0;padding-left:24px;}"'
+      + '+ "#dsh-filefix .md li{margin:4px 0;}"'
+      + '+ "#dsh-filefix .md code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;'
+      + 'background:"+cb+";padding:1px 5px;border-radius:4px;}"'
+      + '+ "#dsh-filefix .md pre.md-code{background:"+cb+";border:1px solid "+bd+";border-radius:8px;'
+      + 'padding:10px 12px;overflow:auto;margin:12px 0;}"'
+      + '+ "#dsh-filefix .md pre.md-code code{background:none;padding:0;font-size:12.5px;line-height:1.55;}"'
+      + '+ "#dsh-filefix .md blockquote{margin:12px 0;padding:2px 0 2px 12px;border-left:3px solid "+bd+";color:"+qt+";}"'
+      + '+ "#dsh-filefix .md hr{border:none;border-top:1px solid "+bd+";margin:18px 0;}"'
+      + '+ "#dsh-filefix .md a{color:"+lnk+";text-decoration:none;border-bottom:1px solid "+lnk+";}"'
+      + '+ "#dsh-filefix .md table{border-collapse:collapse;margin:12px 0;font-size:13px;display:block;overflow-x:auto;}"'
+      + '+ "#dsh-filefix .md th,#dsh-filefix .md td{border:1px solid "+bd+";padding:6px 10px;text-align:left;}"'
+      + '+ "#dsh-filefix .md th{background:"+cb+";font-weight:600;}"'
+      + '+ "#dsh-filefix .md img{max-width:100%;border-radius:6px;}"'
+      + '+ "#dsh-filefix .md .md-img{color:"+sub+";font-size:12px;}";}'
+      // ── 关掉"显示着错误"的那个页签 ──
       + 'function closeErrTab(){try{'
       + 'var ers=document.querySelectorAll("[data-textpreview-state=loading]");'
       + 'for(var i=0;i<ers.length;i++){var n=ers[i],d=0;'
@@ -1368,10 +1458,7 @@ struct Index {
       + 'if(id){var cb=document.querySelector("[data-dockkit-tab-close=\\""+id+"\\"]");'
       + 'if(cb){cb.click();return true;}}}'
       + 'n=n.parentElement;}}}catch(e){}return false;}'
-      // 按文件名兜底：**只在 dock 页签里找**。
-      // 【踩过的坑】原来先用 [aria-selected=true] 找，而那个选择器会匹配到
-      //   会话行、"对话"页签等无关元素，于是认错目标、真正的报错页签关不掉 ——
-      //   表现就是"上下文打开的文件，关闭查看器后原版页签还在"（用户反馈）。
+      // 按文件名兜底：只在 dock 页签里找（别用 [aria-selected=true]，会认错目标）
       + 'function closeDshTab(name){try{if(!name)return false;'
       + 'var ts=document.querySelectorAll("[data-dockkit-tab]"),cand=null,i,t;'
       + 'for(i=0;i<ts.length;i++){t=(ts[i].innerText||"").trim();if(t===name){cand=ts[i];break;}}'
@@ -1392,17 +1479,26 @@ struct Index {
       + 'function close(){var o=document.getElementById("dsh-filefix");'
       + 'if(o&&o.parentNode)o.parentNode.removeChild(o);'
       + 'if(shown){shown=false;try{window.dshShell.setFileFix(0);}catch(e){}}'
+      // 关闭查看器时把原版那个报错页签也一并收掉
       + 'closeErrTab();if(lastUsed)closeDshTab(base(lastUsed));'
       + 'setTimeout(function(){closeErrTab();if(lastUsed)closeDshTab(base(lastUsed));},350);}'
       + 'window.__dshCloseFileFix=close;'
+      // ── 渲染 ──
       + 'function render(v,path){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
       + 'var dk=dark();'
       + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
       + 'hb=dk?"#1b1b1c":"#f9fafb",sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5";'
       + 'var mono="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";'
+      + 'var raw=(v&&typeof v.text==="string")?v.text:"（读取失败）";'
+      + 'var name=base(path||"");'
+      // 默认：.md/.markdown 用 Markdown 渲染，其余纯文本
+      + 'var md=/[.](md|markdown|mdx)$/i.test(name);'
+      + 'var wrapped=true;'
+      + 'var st=document.createElement("style");st.textContent=css(dk);'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
       + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
+      + 'w.appendChild(st);'
       + 'var bar=document.createElement("div");'
       + 'bar.style.cssText="display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid "+bd+";background:"+hb+";flex:0 0 auto;";'
       + 'var pth=document.createElement("div");pth.textContent=(v&&v.absolutePath)||path||"";'
@@ -1410,34 +1506,59 @@ struct Index {
       + 'function mkbtn(label,on){var b=document.createElement("button");b.textContent=label;'
       + 'b.style.cssText="border:1px solid "+bd+";background:"+bt+";color:"+fg+";border-radius:7px;padding:5px 11px;font-size:12.5px;white-space:nowrap;";'
       + 'b.onclick=on;return b;}'
+      + 'var body=document.createElement("div");'
+      + 'body.style.cssText="flex:1;overflow:auto;";'
       + 'var pre=document.createElement("pre");'
-      + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:"+mono+";font-size:12.5px;line-height:1.65;";'
-      + 'pre.textContent=(v&&typeof v.text==="string")?v.text:"（读取失败）";'
-      + 'var wrapped=true;'
-      + 'function syncWrap(){'
+      + 'pre.style.cssText="margin:0;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:"+mono+";font-size:12.5px;line-height:1.65;";'
+      + 'body.appendChild(pre);'
+      // 按模式刷新正文（Markdown 用 .md 容器另起一个 div）
+      + 'var mdBox=null;'
+      + 'function paint(){'
+      + 'if(md){'
+      + 'if(!mdBox){mdBox=document.createElement("div");mdBox.className="md";'
+      + 'mdBox.style.cssText="padding:12px 14px;";body.appendChild(mdBox);}'
+      + 'pre.style.display="none";mdBox.style.display="block";'
+      + 'mdBox.innerHTML=mdToHtml(raw);'
+      + '}else{'
+      + 'if(mdBox)mdBox.style.display="none";'
+      + 'pre.style.display="block";pre.textContent=raw;}'
+      + 'syncView();}'
+      + 'var wrapBtn=mkbtn("",function(){wrapped=!wrapped;'
+      + 'pre.style.whiteSpace=wrapped?"pre-wrap":"pre";pre.style.wordBreak=wrapped?"break-word":"normal";'
+      + 'pre.style.overflowX=wrapped?"hidden":"auto";syncView();});'
+      + 'var viewBtn=mkbtn("",function(){md=!md;paint();});'
+      + 'var reBtn=mkbtn("重新读取",function(){raw="读取中…";paint();'
+      + 'rd(path,1,function(v2){if(!v2){raw="（读取失败）";paint();return;}'
+      + 'raw=typeof v2.text==="string"?v2.text:"（读取失败）";'
+      + 'pth.textContent=v2.absolutePath||path;paint();});});'
+      + 'var clBtn=mkbtn("关闭",close);'
+      // 按钮状态用文字表达（只靠颜色深浅用户看不出 —— 踩过）
+      + 'function syncView(){'
+      + 'viewBtn.textContent=md?"Markdown":"纯文本";'
+      + 'viewBtn.style.background=md?(dk?"#182740":"#eaf1ff"):bt;'
+      + 'viewBtn.style.borderColor=md?(dk?"#2b4a7a":"#b9cdf0"):bd;'
+      + 'viewBtn.style.color=md?(dk?"#8fb6ff":"#1a4fb4"):sub;'
+      + 'wrapBtn.style.display=md?"none":"";'
       + 'wrapBtn.textContent=wrapped?"自动换行":"取消换行";'
       + 'wrapBtn.style.background=wrapped?(dk?"#182740":"#eaf1ff"):bt;'
       + 'wrapBtn.style.borderColor=wrapped?(dk?"#2b4a7a":"#b9cdf0"):bd;'
       + 'wrapBtn.style.color=wrapped?(dk?"#8fb6ff":"#1a4fb4"):sub;}'
-      + 'var wrapBtn=mkbtn("",function(){wrapped=!wrapped;'
-      + 'pre.style.whiteSpace=wrapped?"pre-wrap":"pre";pre.style.wordBreak=wrapped?"break-word":"normal";'
-      + 'pre.style.overflowX=wrapped?"hidden":"auto";syncWrap();});'
-      + 'syncWrap();'
-      + 'var reBtn=mkbtn("重新读取",function(){pre.textContent="读取中…";'
-      + 'rd(path,1,function(v2){if(!v2){pre.textContent="（读取失败）";return;}'
-      + 'pre.textContent=typeof v2.text==="string"?v2.text:"（读取失败）";'
-      + 'pth.textContent=v2.absolutePath||path;});});'
-      + 'var clBtn=mkbtn("关闭",close);'
-      + 'bar.appendChild(pth);bar.appendChild(wrapBtn);bar.appendChild(reBtn);bar.appendChild(clBtn);'
-      + 'w.appendChild(bar);w.appendChild(pre);'
+      + 'bar.appendChild(pth);bar.appendChild(viewBtn);bar.appendChild(wrapBtn);bar.appendChild(reBtn);bar.appendChild(clBtn);'
+      + 'w.appendChild(bar);w.appendChild(body);'
+      + 'paint();'
+      // 加载更多：按原始文本追加后重新渲染
       + 'if(v&&v.eof===false){var ft=document.createElement("div");'
       + 'ft.style.cssText="flex:0 0 auto;padding:9px;text-align:center;border-top:1px solid "+bd+";background:"+hb+";";'
       + 'var mb=mkbtn("加载更多",function(){mb.disabled=true;mb.textContent="加载中…";'
       + 'var off=(v.offset||1)+(v.lines||0);'
       + 'rd(path,off,function(v2){mb.disabled=false;mb.textContent="加载更多";'
-      + 'if(!v2||typeof v2.text!=="string")return;pre.textContent=pre.textContent+v2.text;'
-      + 'v.offset=v2.offset;v.lines=v2.lines;v.eof=v2.eof;});});'
+      + 'if(!v2||typeof v2.text!=="string")return;raw=raw+v2.text;'
+      + 'v.offset=v2.offset;v.lines=v2.lines;v.eof=v2.eof;paint();});});'
       + 'ft.appendChild(mb);w.appendChild(ft);}'
+      // 链接不跳转（否则 WebView 会离开 DSH 页面）
+      + 'w.addEventListener("click",function(e){var n=e.target;'
+      + 'while(n&&n!==w){if(n.tagName==="A"){e.preventDefault();return;}n=n.parentElement;}},true);'
+      // 侧滑关闭：只认从左边缘起滑
       + 'var sx=null,sy=null;'
       + 'w.addEventListener("touchstart",function(e){var t=e.touches[0];sx=t.clientX;sy=t.clientY;},{passive:true});'
       + 'w.addEventListener("touchend",function(e){if(sx===null)return;var t=e.changedTouches[0];'
@@ -1445,7 +1566,7 @@ struct Index {
       + 'if(fromEdge&&dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
       + 'document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
-      // 候选路径：全部收集，去重
+      // 候选路径：全部收集（去重）
       + 'function candidates(){var out=[],seen={};'
       + 'function push(p){if(!p)return;p=String(p).trim();if(!p||seen[p])return;seen[p]=1;out.push(p);}'
       + 'try{var els=document.querySelectorAll("[data-path-label]");'
@@ -1464,12 +1585,11 @@ struct Index {
       + 'function tryAll(list,idx,cb){'
       + 'if(!list||idx>=list.length){cb(null,null);return;}'
       + 'rd(list[idx],1,function(v){'
-      + 'if(v&&typeof v.text==="string"&&v.text.length>=0){cb(v,list[idx]);}'
+      + 'if(v&&typeof v.text==="string"){cb(v,list[idx]);}'
       + 'else{tryAll(list,idx+1,cb);}});}'
-      // 全部失败时：把"看到了什么"显示出来，便于把截图发给 AI 定位
+      // 全失败：把"看到了什么"显示出来，便于截图定位
       + 'function showDiag(list){var lines=[];'
-      + 'lines.push("无法确定要读哪个文件。请把本页截图发给 AI。");'
-      + 'lines.push("");'
+      + 'lines.push("无法确定要读哪个文件。请把本页截图发给 AI。");lines.push("");'
       + 'lines.push("会话标识 scope = "+(getScope()||"（空）"));'
       + 'lines.push("尝试过的候选路径（"+list.length+" 个）：");'
       + 'for(var i=0;i<list.length;i++)lines.push("  "+i+". "+list[i]);'
@@ -1478,11 +1598,7 @@ struct Index {
       + 'for(i=0;i<els.length;i++)lines.push("  · "+(els[i].innerText||"").trim());}catch(e){}'
       + 'try{var ts=document.querySelectorAll("[data-dockkit-tab]");'
       + 'lines.push("");lines.push("页签："+Array.prototype.map.call(ts,function(t){return (t.innerText||"").trim();}).join(" | "));}catch(e){}'
-      + 'try{var er=document.querySelector("[data-textpreview-state=loading]");'
-      + 'lines.push("");lines.push("错误元素 HTML（截断）：");'
-      + 'lines.push(er?String(er.outerHTML).slice(0,400):"（没找到）");}catch(e){}'
       + 'render({text:lines.join("\\n"),absolutePath:"诊断"},null);}'
-      // 首次处理：优先用文件树点击时的预取（那条路径几乎无等待）
       + 'function show(path,preset){'
       + 'var done=function(v,used){if(v){lastUsed=used||path;render(v,lastUsed);'
       + 'closeErrTab();closeDshTab(base(lastUsed));'
@@ -1491,7 +1607,6 @@ struct Index {
       + 'if(preset&&prefetch){var pv=prefetch;prefetch=null;done(pv,path);return;}'
       + 'if(path){done(null,path);rd(path,1,function(v){done(v,path);});return;}'
       + 'var list=candidates();'
-      + 'if(preset&&prefetch){var pv2=prefetch;prefetch=null;done(pv2,list[0]);return;}'
       + 'if(!list.length){showDiag(list);return;}'
       + 'tryAll(list,0,done);}'
       + 'function findErr(){try{var ds=document.querySelectorAll("[data-textpreview-state=loading]");'
@@ -1506,12 +1621,11 @@ struct Index {
       + 'lastPath=n.getAttribute("data-files-path");prefetch=null;'
       + 'rd(lastPath,1,function(v){prefetch=v;});'
       + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
-      // ★兜底总闸：不管从哪个入口触发，只要右侧栏出现"不可用"就接管
+      // ★兜底总闸：任何入口触发的错误都接管
       + 'setInterval(function(){try{'
       + 'if(shown)return;'
       + 'if(!findErr()){errSig="";return;}'
-      + 'var list=candidates();'
-      + 'var sig=list.join("|");'
+      + 'var list=candidates();var sig=list.join("|");'
       + 'if(!list.length){if(errSig!=="__none__"){errSig="__none__";showDiag(list);}return;}'
       + 'if(sig===errSig)return;'
       + 'errSig=sig;show(null,false);'
