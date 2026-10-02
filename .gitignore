@@ -1,0 +1,20 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# 签名材料（证书/口令，绝不入库）
+/signature
+# 本地临时备份
+/_backup
+# 构建产物与依赖
+/entry/build
+/entry/oh_modules
