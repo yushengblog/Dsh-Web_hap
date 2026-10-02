@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3622'
+const BUILD_TAG: string = '构建 v10-01-3632'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1261,33 +1261,38 @@ struct Index {
     //    · sidebarCol 的 border-right-color 是半透明的 rgba(0,0,0,.12)，
     //      必须与左块底色做 alpha 合成，才能得到可直接使用的实色分界线
     //      （浅色下合成结果正是之前硬编码的 #DBDCDE；深色下会自动变成浅色分界线）
-    this.js('(function(){if(window.__dshRail){return;}window.__dshRail=1;'
-      + 'function rgbp(c){var m=c&&c.match(/rgba?\\(([\\d.]+),\\s*([\\d.]+),\\s*([\\d.]+)(?:,\\s*([\\d.]+))?\\)/);'
-      + 'if(!m)return null;return{r:parseFloat(m[1]),g:parseFloat(m[2]),b:parseFloat(m[3]),a:m[4]===undefined?1:parseFloat(m[4])};}'
-      + 'function hx(o){if(!o)return "";function h(x){var v=Math.round(x);if(v<0)v=0;if(v>255)v=255;var s=v.toString(16);return s.length<2?"0"+s:s;}'
-      + 'return "#"+h(o.r)+h(o.g)+h(o.b);}'
-      + 'function effBg(el){var n=el;while(n&&n!==document.documentElement){'
-      + 'var c=getComputedStyle(n).backgroundColor;'
-      + 'if(c&&c!=="rgba(0, 0, 0, 0)"&&c!=="transparent")return c;n=n.parentElement;}return "";}'
-      + 'function blend(fg,bg){if(!fg)return "";if(!bg||fg.a>=1)return hx(fg);'
-      + 'return hx({r:fg.a*fg.r+(1-fg.a)*bg.r,g:fg.a*fg.g+(1-fg.a)*bg.g,b:fg.a*fg.b+(1-fg.a)*bg.b});}'
-      + 'setInterval(function(){try{'
-      + 'var c=document.querySelector("[class*=sidebarCol]");if(!c)return;'
-      + 'var w=Math.round(c.getBoundingClientRect().width);if(w>40)window.dshShell.setRailWidth(w);'
-      + 'var rb=rgbp(effBg(c));'
-      + 'var cc=document.querySelector("[class*=centerCol]");'
-      + 'var cb=cc?rgbp(effBg(cc)):null;'
-      + 'if(!cb){cb=rgbp(effBg(document.body));}'
-      + 'var dv=blend(rgbp(getComputedStyle(c).borderRightColor),rb);'
-      + 'var rs=hx(rb),cs=hx(cb);'
-      + 'if(rs&&cs){window.dshShell.setTheme(rs,cs,dv?dv:rs);}'
-      + '}catch(e){}},400);})()');
+    // ① 已合并进 ⑦（下面）：侧栏宽度/配色、浮层状态统一由一个轮询负责，
+    //    避免多个 setInterval 同时做全 DOM 查询把手机主线程拖死。
+
     // ② 在 DSH 设置弹窗里、Agent 预设右侧插入「站点」选项卡
     this.js('(function(){if(window.__dshSites){return;}window.__dshSites=1;setInterval(function(){try{var d=document.querySelector("[role=dialog]");if(!d){return;}if(d.querySelector("[data-dsh-sites]")){return;}var bs=d.querySelectorAll("button,[role=tab]");var a=null;for(var i=0;i<bs.length;i++){var x=(bs[i].textContent||"").trim();if(x.indexOf("Agent")===0){a=bs[i];break;}}if(!a||!a.parentElement){return;}var b=document.createElement("button");b.type="button";b.setAttribute("data-dsh-sites","1");b.textContent="\u7ad9\u70b9";b.className=a.className;b.style.marginLeft="4px";b.onclick=function(e){e.stopPropagation();window.dshShell.openSites();};a.parentElement.insertBefore(b,a.nextSibling);}catch(e){}},1200);})()');
     // ③ 自动登录：按当前站点的账号密码填表并提交
     this.js('(function(){if(window.__dshLogin){return;}window.__dshLogin=1;function sv(el,v){try{var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value");if(d&&d.set){d.set.call(el,v);}else{el.value=v;}el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));}catch(e){}}function go(){try{var c=JSON.parse(window.dshShell.getCurrent()||"{}");var g=JSON.parse(window.dshShell.getGroups()||"[]");var a=(g[c.g]&&g[c.g].items)?g[c.g].items[c.i]:null;if(!a||!a.user||!a.pass){return;}var p=document.querySelector("input[type=password]");if(!p){return;}var sc=p.form||document;var ins=sc.querySelectorAll("input");var u=null;for(var i=0;i<ins.length;i++){var t=(ins[i].type||"text").toLowerCase();if(t==="text"||t==="email"||t==="tel"){u=ins[i];break;}}if(u&&!u.value){sv(u,a.user);}if(!p.value){sv(p,a.pass);}var b=sc.querySelector("button[type=submit],input[type=submit]");if(b){b.click();}else if(p.form){p.form.requestSubmit();}}catch(e){}}setTimeout(go,1500);setTimeout(go,3500);})()');
-    // ④ 自动点掉首次引导弹窗（"继续"/"我知道了"）：文字匹配 + 按坐标两路并用，多时机重试
-    this.js('(function(){if(window.__dshDis2){return;}window.__dshDis2=1;function fire(el){try{el.click();}catch(e){}try{el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}catch(e){}try{var p=el.closest&&el.closest("button,[role=button]");if(p&&p!==el){p.click();}}catch(e){}}function ok(t){return t==="\u7ee7\u7eed"||t==="\u6211\u77e5\u9053\u4e86"||t==="\u5f00\u59cb\u4f7f\u7528";}function collect(root,out){try{var l=root.querySelectorAll("*");for(var i=0;i<l.length;i++){out.push(l[i]);if(l[i].shadowRoot){collect(l[i].shadowRoot,out);}}}catch(e){}}function byText(){try{var out=[];collect(document,out);for(var i=0;i<out.length;i++){var el=out[i];var t=(el.textContent||"").replace(/\\s/g,"");if(t.length===0||t.length>6){continue;}if(!ok(t)){continue;}var r=el.getBoundingClientRect();if(r.width<=1||r.height<=1||r.width>window.innerWidth*0.6){continue;}fire(el);return 1;}}catch(e){}return 0;}function byPoint(){try{var w=window.innerWidth,h=window.innerHeight;var ps=[[0.69,0.68],[0.66,0.68],[0.72,0.68],[0.69,0.72],[0.60,0.68],[0.62,0.72],[0.69,0.64]];for(var i=0;i<ps.length;i++){var el=document.elementFromPoint(Math.round(w*ps[i][0]),Math.round(h*ps[i][1]));if(!el){continue;}if(ok((el.textContent||"").replace(/\\s/g,""))){fire(el);return 1;}var p=el.parentElement;if(p&&ok((p.textContent||"").replace(/\\s/g,""))){fire(p);return 1;}}}catch(e){}return 0;}function tick(){if(byText()){return;}byPoint();}setInterval(tick,600);setTimeout(tick,400);setTimeout(tick,1200);setTimeout(tick,2500);setTimeout(tick,5000);setTimeout(tick,9000);})()');
+    // ④ 自动点掉首次引导弹窗（"继续"/"我知道了"/"开始使用"）
+    // ⚠️ 性能红线（真机踩到）：
+    //    早期版本用 setInterval(600ms) + querySelectorAll("*") 逐个读 textContent，
+    //    并且穿透 shadow DOM —— textContent 会遍历整个子树，在本对话这种上万节点的页面上
+    //    等于每 600ms 做上万次子树遍历，**把手机主线程打满**，
+    //    导致 DSH 自己的异步请求（如 /api/workspaceFiles/stat）被饿死，
+    //    文件查看器报"文件资源服务不可用"。桌面 CPU 扛得住所以没暴露。
+    // ✅ 现在的做法：只在 **几个固定时刻** 跑（不常驻），且**只扫 button/[role=button]**
+    //    （集合很小，innerText 也很轻）。跑完自动结束。
+    this.js('(function(){if(window.__dshDis3){return;}window.__dshDis3=1;'
+      + 'function ok(t){return t==="\u7ee7\u7eed"||t==="\u6211\u77e5\u9053\u4e86"||t==="\u5f00\u59cb\u4f7f\u7528";}'
+      + 'function fire(el){try{el.click();}catch(e){}'
+      + 'try{el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,view:window}));}catch(e){}}'
+      + 'function tick(){try{'
+      + 'var bs=document.querySelectorAll("button,[role=button]");'
+      + 'for(var i=0;i<bs.length;i++){var el=bs[i];'
+      + 'var t=(el.innerText||el.textContent||"").replace(/\\s/g,"");'
+      + 'if(t.length===0||t.length>8)continue;'
+      + 'if(!ok(t))continue;'
+      + 'var r=el.getBoundingClientRect();'
+      + 'if(r.width<=1||r.height<=1)continue;'
+      + 'fire(el);return true;}}catch(e){}return false;}'
+      + 'var dl=[400,1200,2500,5000,9000,15000];'
+      + 'for(var k=0;k<dl.length;k++){(function(d){setTimeout(tick,d);})(dl[k]);}'
+      + '})()');
     // ⑤ 已合并进 ⑦（下面）：弹窗检测统一由 __dshDialogOpen 负责，
     //    同时用于"侧滑关闭弹窗"和"隐藏左侧栏那行"，避免两个轮询互相覆盖状态。
     // ⑦ 浮层状态上报 + 关闭函数（右侧边栏 / 网页弹窗）
@@ -1307,18 +1312,27 @@ struct Index {
     this.js('(function(){if(window.__dshOv2){return;}window.__dshOv2=1;'
       + 'function iv(el){try{if(!el)return false;var r=el.getBoundingClientRect();'
       + 'return r.width>0&&r.height>0&&r.left<window.innerWidth&&r.right>0&&r.top<window.innerHeight&&r.bottom>0;}catch(e){return false;}}'
+      // 颜色工具（原在 ① 里，合并到这里）
+      + 'function rgbp(c){var m=c&&c.match(/rgba?\\(([\\d.]+),\\s*([\\d.]+),\\s*([\\d.]+)(?:,\\s*([\\d.]+))?\\)/);'
+      + 'if(!m)return null;return{r:parseFloat(m[1]),g:parseFloat(m[2]),b:parseFloat(m[3]),a:m[4]===undefined?1:parseFloat(m[4])};}'
+      + 'function hx(o){if(!o)return "";function h(x){var v=Math.round(x);if(v<0)v=0;if(v>255)v=255;var s=v.toString(16);return s.length<2?"0"+s:s;}'
+      + 'return "#"+h(o.r)+h(o.g)+h(o.b);}'
+      + 'function effBg(el){var n=el,d=0;while(n&&n!==document.documentElement&&d<12){d++;'
+      + 'var c=getComputedStyle(n).backgroundColor;'
+      + 'if(c&&c!=="rgba(0, 0, 0, 0)"&&c!=="transparent")return c;n=n.parentElement;}return "";}'
+      + 'function blend(fg,bg){if(!fg)return "";if(!bg||fg.a>=1)return hx(fg);'
+      + 'return hx({r:fg.a*fg.r+(1-fg.a)*bg.r,g:fg.a*fg.g+(1-fg.a)*bg.g,b:fg.a*fg.b+(1-fg.a)*bg.b});}'
       + 'window.__dshRightOpen=function(){try{'
       // 只有"折叠态"（窄屏）下右侧栏才是占满屏的浮层、才值得用返回键收起；
       // 展开态（内屏 >600）它是常驻分栏，返回键不应该把它收起来。
       + 'if(window.innerWidth>600)return false;'
       + 'if(iv(document.querySelector("[aria-label=\'打开右侧边栏\']")))return false;'
       + 'return iv(document.querySelector("[aria-label=\'收起右侧边栏\']"));}catch(e){return false;}};'
+      // 弹窗检测：**只**看 [role=dialog]/[aria-modal=true]。
+      // ⚠️ 早期版本还叠加了"遍历所有 div 调 getComputedStyle"的启发式 ——
+      //    那会强制样式重算，在长页面上极耗；已删除（手机端会因此卡到接口超时）。
       + 'window.__dshDialogOpen=function(){try{var ds=document.querySelectorAll("[role=dialog],[aria-modal=true]");'
-      + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();if(r.width>120&&r.height>120)return true;}'
-      + 'var al=document.querySelectorAll("div");for(var k=0;k<al.length;k++){'
-      + 'var cs=getComputedStyle(al[k]);if(cs.position!=="fixed")continue;'
-      + 'var r2=al[k].getBoundingClientRect();'
-      + 'if(r2.width>window.innerWidth*0.6&&r2.height>window.innerHeight*0.5)return true;}}catch(e){}return false;};'
+      + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();if(r.width>120&&r.height>120)return true;}}catch(e){}return false;};'
       + 'window.__dshCloseRightPanel=function(){try{if(!window.__dshRightOpen())return;'
       + 'var b=document.querySelector("[aria-label=\'收起右侧边栏\']");if(b)b.click();}catch(e){}};'
       + 'window.__dshCloseDialog=function(){try{var ds=document.querySelectorAll("[role=dialog],[aria-modal=true]");'
@@ -1327,8 +1341,25 @@ struct Index {
       + 'var t=(bs[j].getAttribute("aria-label")||bs[j].innerText||"");'
       + 'if(t.indexOf("关闭")>=0||t.indexOf("Close")>=0){bs[j].click();return;}}}'
       + 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",code:"Escape",keyCode:27,which:27,bubbles:true}));}catch(e){}};'
-      + 'setInterval(function(){try{window.dshShell.setOverlay(window.__dshRightOpen()?1:0);'
-      + 'window.dshShell.setDialog(window.__dshDialogOpen()?1:0);}catch(e){}},400);})()');
+      // ── 统一轮询（800ms 一次，替代原来 3 个独立的 setInterval）──
+      // · 侧栏元素做缓存，避免每次都做全 DOM 属性查询
+      // · 三个上报值都做**变化检测**，只有真变了才跨 JS↔原生桥（桥调用本身有开销）
+      + 'var railEl=null,lastTheme="",lastOv=-1,lastDlg=-1;'
+      + 'function tick(){try{'
+      + 'if(!railEl||!document.contains(railEl)){railEl=document.querySelector("[class*=sidebarCol]");}'
+      + 'if(railEl){'
+      + 'var w=Math.round(railEl.getBoundingClientRect().width);if(w>40)window.dshShell.setRailWidth(w);'
+      + 'var rb=rgbp(effBg(railEl));'
+      + 'var cc=document.querySelector("[class*=centerCol]");'
+      + 'var cb=cc?rgbp(effBg(cc)):null;if(!cb){cb=rgbp(effBg(document.body));}'
+      + 'var dv=blend(rgbp(getComputedStyle(railEl).borderRightColor),rb);'
+      + 'var rs=hx(rb),cs=hx(cb);'
+      + 'if(rs&&cs){var key=rs+cs+(dv?dv:rs);if(key!==lastTheme){lastTheme=key;window.dshShell.setTheme(rs,cs,dv?dv:rs);}}}'
+      + 'var ov=window.__dshRightOpen()?1:0;if(ov!==lastOv){lastOv=ov;window.dshShell.setOverlay(ov);}'
+      + 'var dg=window.__dshDialogOpen()?1:0;if(dg!==lastDlg){lastDlg=dg;window.dshShell.setDialog(dg);}'
+      + '}catch(e){}}'
+      + 'setTimeout(tick,300);setInterval(tick,800);'
+      + '})()');
     //    这样它属于网页 DOM，设置弹窗天然盖在它上面；收起导航栏时 DSH 也会让它一起收。
     this.js('(function(){if(window.__dshCur){return;}window.__dshCur=1;setInterval(function(){try{if(!document.getElementById("dsh-curlbl")){var row=document.querySelector("[class*=logoRow]");if(!row||!row.parentElement){return;}var d=document.createElement("div");d.id="dsh-curlbl";d.style.cssText="font-size:11px;color:#8a8a8a;padding:2px 14px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;";d.onclick=function(){try{window.dshShell.openSwitcher();}catch(e){}};row.parentElement.insertBefore(d,row.nextSibling);}var e=document.getElementById("dsh-curlbl");if(e){var t=window.dshShell.getCurLabel();if(t&&t!==e.textContent){e.textContent=t;}}}catch(x){}},1200);})()');
   }
