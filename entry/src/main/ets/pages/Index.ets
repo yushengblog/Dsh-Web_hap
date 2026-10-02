@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3702'
+const BUILD_TAG: string = '构建 v10-01-3712'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -2884,6 +2884,10 @@ struct Index {
         .padding({ left: 8, right: 8, top: 6, bottom: 6 })
         .backgroundColor('#99000000')
         .margin({ top: this.safeTop })
+        // ★ 触摸穿透：诊断条只是"显示信息"，绝不能挡住下面的网页。
+        //   之前它会挡住左侧栏切换按钮，用户点不到（用户反馈）。
+        //   HitTestMode.Transparent = 自己照常响应，**同时**把事件放给下层的兄弟节点。
+        .hitTestBehavior(HitTestMode.Transparent)
       }
 
       // 状态栏区域**不再单独画色条**（用户定稿）。
