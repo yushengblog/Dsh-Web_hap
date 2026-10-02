@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3642'
+const BUILD_TAG: string = '构建 v10-01-3652'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -2755,15 +2755,12 @@ struct Index {
           }
         })
 
-      // 状态栏区域：一条**纯色条**（用户定稿）。
-      // 之前是"左块=网页侧栏色 + 1px 分界线 + 右块=对话区色"的拼色方案，
-      // 需要网页上报侧栏宽度和两侧配色，开销大且容易错位；现在直接取消，
-      // 只按明暗给一条底色（浅色 #FFFFFF / 深色 #1B1B1C），随 DSH 主题自动切换。
-      // 必须放在 Web 之后：ArkUI 靠声明顺序层叠，放前面会被 Web 盖住
-      Row()
-        .width('100%')
-        .height(this.safeTop)
-        .backgroundColor(this.tc('#FFFFFF', '#1B1B1C'))
+      // 状态栏区域**不再单独画色条**（用户定稿）。
+      // 窗口是 setWindowLayoutFullScreen(true)，所以状态栏那一条露出来的
+      // 就是根 Stack 的背景色（见 build() 末尾的
+      // .backgroundColor(this.tc('#FFFFFF', '#151517'))）——
+      // 也就是"页面背景自然延伸上去"，和以前的表现一致。
+      // 网页内容靠外层 Column 的 .padding({ top: this.safeTop }) 下移，不会跑到状态栏上面。
 
       // 站点快速切换面板（点左侧栏那行"当前连接情况"时弹出）
       if (this.showSwitcher) {
@@ -2797,7 +2794,9 @@ struct Index {
     .width('100%')
     .height('100%')
     .alignContent(Alignment.TopStart)
-    .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+    // 状态栏那一条露出的就是这里的背景色（窗口全屏布局），所以这里等于"页面底色延伸上去"。
+    // 深色值取 DSH 深色主题的对话区底色（#151517），和网页顶部天然接得上。
+    .backgroundColor(this.tc('#FFFFFF', '#151517'))
     // 记录窗口宽度，供折叠屏断点适配使用（外屏≈540vp / 内屏≈782vp）
     .onAreaChange((oldV: Area, newV: Area) => {
       const w = Number(newV.width);
