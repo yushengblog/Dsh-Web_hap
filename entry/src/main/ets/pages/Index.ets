@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3602'
+const BUILD_TAG: string = '构建 v10-01-3612'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -30,6 +30,8 @@ const KEY_DAV_USER: string = 'dav_user';
 const KEY_DAV_PASS: string = 'dav_pass';
 const KEY_DAV_AUTO: string = 'dav_auto';
 const KEY_DAV_LAST: string = 'dav_last';
+// 上次记录的深色模式（用于冷启动第一帧就上对颜色，避免闪白）
+const KEY_DARK: string = 'dark_mode';
 
 // 备份文件结构
 interface BackupFile {
@@ -126,6 +128,8 @@ struct Index {
   @State railColor: string = '#F9FAFB';
   @State chatColor: string = '#FFFFFF';
   @State dividerColor: string = '#DBDCDE';
+  // App 自身原生页面是否用深色（由网页上报的配色亮度推导，随 DSH 主题自动切换）
+  @State isDark: boolean = false;
   private sysBarDark: boolean = false;
   private sysBarApplied: boolean = false;
   // 网页里是否有"大浮层弹窗"（如 DSH 设置窗）打开；打开时不显示左侧栏的「当前连接情况」行，
@@ -251,6 +255,12 @@ struct Index {
     this.injectLen = this.injectJs.length;
   }
 
+  // 主题取色：浅色 / 深色两套。所有原生页面颜色都走这里，
+  // isDark 随网页配色自动切换（见 applySysBarIcons），所以 DSH 换主题时 App 一起变。
+  tc(light: string, dark: string): string {
+    return this.isDark ? dark : light;
+  }
+
   // 系统状态栏图标颜色跟随状态栏底色（底色深 → 图标用白色），否则深色模式下看不见时间/电量
   applySysBarIcons(railHex: string): void {
     try {
@@ -262,6 +272,17 @@ struct Index {
       }
       const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
       const dark = lum < 0.5;
+      // App 原生页面同步切深色
+      if (dark !== this.isDark) {
+        this.isDark = dark;
+        try {
+          if (this.store !== null) {
+            this.store.putSync(KEY_DARK, dark ? '1' : '0');
+            this.store.flush();
+          }
+        } catch (e) {
+        }
+      }
       if (this.sysBarApplied && dark === this.sysBarDark) {
         return;
       }
@@ -612,7 +633,7 @@ struct Index {
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
     .borderRadius(12)
     .backgroundColor('#0A59F7')
-    .shadow({ radius: 16, color: '#33000000', offsetX: 0, offsetY: 6 })
+    .shadow({ radius: 16, color: this.tc('#33000000', '#66000000'), offsetX: 0, offsetY: 6 })
   }
 
   moveGroup(gi: number, d: number): void {
@@ -744,6 +765,9 @@ struct Index {
       const da = this.store.getSync(KEY_DAV_AUTO, '1') as string;
       this.davAuto = (da !== '0');
       this.davReady = true;
+      // 冷启动先按上次记录的明暗上色，网页上报后会再校正
+      const dk = this.store.getSync(KEY_DARK, '0') as string;
+      this.isDark = (dk === '1');
       // 进过站点：首帧就进"连接中"，直接回到上次那个站点，不再闪站点页
       this.phase = this.visited ? PHASE_LOADING : PHASE_PICKER;
       this.refreshCurLabel();
@@ -1440,7 +1464,8 @@ struct Index {
 
   dotColor(a: Address): string {
     if (a.off) {
-      return '#CCCCCC';
+      // 停用：浅灰 / 深色下压暗
+      return this.tc('#CCCCCC', '#55555D');
     }
     if (a.link === 'ok') {
       return '#22BB55';
@@ -1448,7 +1473,8 @@ struct Index {
     if (a.link === 'fail') {
       return '#EE9933';
     }
-    return '#DDDDDD';
+    // 未测：深色下这个点要比卡片底亮，否则看不见
+    return this.tc('#DDDDDD', '#5A5A62');
   }
 
   linkText(a: Address): string {
@@ -1480,7 +1506,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
           Text('点一条即切换，灰色停用的不会出现')
             .fontSize(11)
-            .fontColor('#999999')
+            .fontColor(this.tc('#999999', '#8A8A92'))
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -1488,7 +1514,7 @@ struct Index {
         Button('关闭')
           .fontSize(13)
           .height(32)
-          .backgroundColor('#EFEFEF')
+          .backgroundColor(this.tc('#EFEFEF', '#2E2E34'))
           .fontColor('#0A59F7')
           .onClick(() => {
             this.showSwitcher = false;
@@ -1502,7 +1528,7 @@ struct Index {
           ForEach(this.groups, (g: Group, gi: number) => {
             Text(g.name)
               .fontSize(12)
-              .fontColor('#999999')
+              .fontColor(this.tc('#999999', '#8A8A92'))
               .width('100%')
               .padding({ left: 16, top: 12, bottom: 4 })
             ForEach(g.items, (a: Address, ai: number) => {
@@ -1518,7 +1544,7 @@ struct Index {
                       .width('100%')
                     Text(a.url)
                       .fontSize(11)
-                      .fontColor('#999999')
+                      .fontColor(this.tc('#999999', '#8A8A92'))
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                       .width('100%')
@@ -1534,7 +1560,7 @@ struct Index {
                 }
                 .width('100%')
                 .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                .backgroundColor(gi === this.curG && ai === this.curI ? '#EEF4FF' : '#FFFFFF')
+                .backgroundColor(gi === this.curG && ai === this.curI ? this.tc('#EEF4FF', '#182740') : this.tc('#FFFFFF', '#1C1C20'))
                 .onClick(() => {
                   this.showSwitcher = false;
                   if (gi !== this.curG || ai !== this.curI) {
@@ -1552,7 +1578,7 @@ struct Index {
     }
     .width('100%')
     .height('72%')
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
     .borderRadius({ topLeft: 18, topRight: 18 })
   }
 
@@ -1672,7 +1698,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
           Text(BUILD_TAG)
             .fontSize(10)
-            .fontColor('#BBBBBB')
+            .fontColor(this.tc('#BBBBBB', '#6E6E76'))
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -1680,9 +1706,9 @@ struct Index {
         Button(this.sortMode ? '完成' : '排序')
           .fontSize(13)
           .height(32)
-          .backgroundColor(this.sortMode ? '#0A59F7' : '#FFFFFF')
+          .backgroundColor(this.sortMode ? '#0A59F7' : this.tc('#FFFFFF', '#1C1C20'))
           .fontColor(this.sortMode ? '#FFFFFF' : '#0A59F7')
-          .border({ width: 1, color: this.sortMode ? '#0A59F7' : '#E2E2E2' })
+          .border({ width: 1, color: this.sortMode ? '#0A59F7' : this.tc('#E2E2E2', '#33333A') })
           .onClick(() => {
             if (this.sortMode) {
               // 点「完成」：保留本次排序
@@ -1696,9 +1722,9 @@ struct Index {
         Button('编辑')
           .fontSize(13)
           .height(32)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
           .fontColor('#0A59F7')
-          .border({ width: 1, color: '#E2E2E2' })
+          .border({ width: 1, color: this.tc('#E2E2E2', '#33333A') })
           .onClick(() => {
             this.openEdit();
           })
@@ -1731,14 +1757,14 @@ struct Index {
           if (this.probing) {
             Text('检测中…')
               .fontSize(11)
-              .fontColor('#999999')
+              .fontColor(this.tc('#999999', '#8A8A92'))
           }
         }
         .width('100%')
 
         Text(this.curLabelText)
           .fontSize(13)
-          .fontColor('#1F1F1F')
+          .fontColor(this.tc('#1F1F1F', '#E6E6E9'))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
@@ -1748,20 +1774,20 @@ struct Index {
       .constraintSize({ maxWidth: this.contentW() })
       .margin({ left: 16, right: 16, bottom: 10 })
       .borderRadius(14)
-      .backgroundColor('#EAF1FF')
+      .backgroundColor(this.tc('#EAF1FF', '#182740'))
 
       // 说明 + 重新检测
       Row({ space: 10 }) {
         Text('绿=可打开 · 橙=没打开 · 灰=没测过 · 🔑=已配账号')
           .fontSize(11)
-          .fontColor('#A0A0A0')
+          .fontColor(this.tc('#A0A0A0', '#8A8A92'))
           .layoutWeight(1)
         Button(this.probing ? '检测中…' : '重新检测')
           .fontSize(12)
           .height(30)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
           .fontColor('#0A59F7')
-          .border({ width: 1, color: '#E2E2E2' })
+          .border({ width: 1, color: this.tc('#E2E2E2', '#33333A') })
           .enabled(!this.probing)
           .onClick(() => {
             this.startProbeAll();
@@ -1780,11 +1806,11 @@ struct Index {
                 Text((g.name && g.name.length > 0) ? g.name : ('系统 ' + (gi + 1).toString()))
                   .fontSize(14)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor('#2B2B2B')
+                  .fontColor(this.tc('#2B2B2B', '#E6E6E9'))
                   .layoutWeight(1)
                 Text(this.groupHint(g))
                   .fontSize(11)
-                  .fontColor('#B0B0B0')
+                  .fontColor(this.tc('#B0B0B0', '#7E7E86'))
               }
               .width('100%')
               .padding({ left: 14, right: 14, top: 12, bottom: 8 })
@@ -1796,8 +1822,8 @@ struct Index {
                     .fontSize(13)
                     .height(36)
                     .layoutWeight(1)
-                    .backgroundColor(gi > 0 ? '#EAEAEA' : '#F5F5F5')
-                    .fontColor(gi > 0 ? '#222222' : '#D0D0D0')
+                    .backgroundColor(gi > 0 ? this.tc('#EAEAEA', '#2E2E34') : this.tc('#F5F5F5', '#232328'))
+                    .fontColor(gi > 0 ? this.tc('#222222', '#E6E6E9') : this.tc('#D0D0D0', '#5A5A62'))
                     .enabled(gi > 0)
                     .onClick(() => {
                       this.moveGroupDirect(gi, -1);
@@ -1806,8 +1832,8 @@ struct Index {
                     .fontSize(13)
                     .height(36)
                     .layoutWeight(1)
-                    .backgroundColor(gi < this.groups.length - 1 ? '#EAEAEA' : '#F5F5F5')
-                    .fontColor(gi < this.groups.length - 1 ? '#222222' : '#D0D0D0')
+                    .backgroundColor(gi < this.groups.length - 1 ? this.tc('#EAEAEA', '#2E2E34') : this.tc('#F5F5F5', '#232328'))
+                    .fontColor(gi < this.groups.length - 1 ? this.tc('#222222', '#E6E6E9') : this.tc('#D0D0D0', '#5A5A62'))
                     .enabled(gi < this.groups.length - 1)
                     .onClick(() => {
                       this.moveGroupDirect(gi, 1);
@@ -1818,7 +1844,7 @@ struct Index {
               }
 
               Divider()
-                .color('#F2F2F2')
+                .color(this.tc('#F2F2F2', '#2A2A30'))
                 .strokeWidth(1)
                 .margin({ left: 14, right: 14 })
 
@@ -1831,7 +1857,7 @@ struct Index {
                     Row({ space: 6 }) {
                       Text((a.name && a.name.length > 0) ? a.name : a.url)
                         .fontSize(15)
-                        .fontColor(a.off ? '#BBBBBB' : '#1F1F1F')
+                        .fontColor(a.off ? this.tc('#BBBBBB', '#6E6E76') : this.tc('#1F1F1F', '#E6E6E9'))
                         .maxLines(1)
                         .textOverflow({ overflow: TextOverflow.Ellipsis })
                         .layoutWeight(1)
@@ -1844,14 +1870,14 @@ struct Index {
 
                     Text(a.url)
                       .fontSize(11)
-                      .fontColor(a.off ? '#CCCCCC' : '#9A9A9A')
+                      .fontColor(a.off ? this.tc('#CCCCCC', '#6E6E76') : this.tc('#9A9A9A', '#8A8A92'))
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                       .width('100%')
 
                     Text(a.off ? '已停用' : this.linkText(a))
                       .fontSize(11)
-                      .fontColor(a.off ? '#BBBBBB' : (a.link === 'fail' ? '#EE9933' : (a.link === 'ok' ? '#22BB55' : '#AAAAAA')))
+                      .fontColor(a.off ? this.tc('#BBBBBB', '#6E6E76') : (a.link === 'fail' ? this.tc('#EE9933', '#F0A64D') : (a.link === 'ok' ? this.tc('#22BB55', '#43D17A') : this.tc('#AAAAAA', '#7E7E86'))))
                       .width('100%')
                   }
                   .layoutWeight(1)
@@ -1859,7 +1885,7 @@ struct Index {
                 }
                 .width('100%')
                 .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-                .backgroundColor(a.off ? '#FAFAFA' : Color.White)
+                .backgroundColor(a.off ? this.tc('#FAFAFA', '#17171A') : this.tc('#FFFFFF', '#1C1C20'))
                 .onClick(() => {
                   if (!this.sortMode && !a.off) {
                     this.connect(gi, ai);
@@ -1873,8 +1899,8 @@ struct Index {
                       .fontSize(13)
                       .height(36)
                       .layoutWeight(1)
-                      .backgroundColor(ai > 0 ? '#EAEAEA' : '#F5F5F5')
-                      .fontColor(ai > 0 ? '#222222' : '#D0D0D0')
+                      .backgroundColor(ai > 0 ? this.tc('#EAEAEA', '#2E2E34') : this.tc('#F5F5F5', '#232328'))
+                      .fontColor(ai > 0 ? this.tc('#222222', '#E6E6E9') : this.tc('#D0D0D0', '#5A5A62'))
                       .enabled(ai > 0)
                       .onClick(() => {
                         this.moveAddrDirect(gi, ai, -1);
@@ -1883,8 +1909,8 @@ struct Index {
                       .fontSize(13)
                       .height(36)
                       .layoutWeight(1)
-                      .backgroundColor(ai < g.items.length - 1 ? '#EAEAEA' : '#F5F5F5')
-                      .fontColor(ai < g.items.length - 1 ? '#222222' : '#D0D0D0')
+                      .backgroundColor(ai < g.items.length - 1 ? this.tc('#EAEAEA', '#2E2E34') : this.tc('#F5F5F5', '#232328'))
+                      .fontColor(ai < g.items.length - 1 ? this.tc('#222222', '#E6E6E9') : this.tc('#D0D0D0', '#5A5A62'))
                       .enabled(ai < g.items.length - 1)
                       .onClick(() => {
                         this.moveAddrDirect(gi, ai, 1);
@@ -1895,14 +1921,14 @@ struct Index {
                 }
                 }
                 .width('100%')
-                .backgroundColor(a.off ? '#FAFAFA' : Color.White)
+                .backgroundColor(a.off ? this.tc('#FAFAFA', '#17171A') : this.tc('#FFFFFF', '#1C1C20'))
               }, (a: Address, ai: number) => (a.url ? a.url : '') + '#' + gi.toString() + '-' + ai.toString() + (a.off ? 'F' : 'T') + (a.link ? a.link : '') + 'L')
             }
             .width('100%')
             .margin({ bottom: 12 })
             .borderRadius(14)
-            .backgroundColor(Color.White)
-            .border({ width: 1, color: '#D3DAE4' })
+            .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+            .border({ width: 1, color: this.tc('#D3DAE4', '#2E2E34') })
             .clip(true)
             }
           }, (g: Group, gi: number) => (g.name ? g.name : '') + '#' + gi.toString() + '#' + (g.ver ? g.ver.toString() : '0') + 'L')
@@ -1915,10 +1941,10 @@ struct Index {
         Column({ space: 8 }) {
           Text('还没有配置站点')
             .fontSize(15)
-            .fontColor('#8A94A6')
+            .fontColor(this.tc('#8A94A6', '#9C9CA4'))
           Text('点右上角「编辑」→ 底部「＋ 新增一个系统」开始添加\n也可以用下面的 WebDAV 备份恢复')
             .fontSize(12)
-            .fontColor('#AAB4C4')
+            .fontColor(this.tc('#AAB4C4', '#7E7E86'))
             .textAlign(TextAlign.Center)
         }
         .width('100%')
@@ -1928,7 +1954,7 @@ struct Index {
 
       Text('共 ' + this.groups.length.toString() + ' 个系统 · 点右上角「排序」可调整顺序')
         .fontSize(11)
-        .fontColor('#C8C8C8')
+        .fontColor(this.tc('#C8C8C8', '#66666E'))
         .width('100%')
         .textAlign(TextAlign.Center)
         .padding({ top: 4, bottom: 8 })
@@ -1945,7 +1971,7 @@ struct Index {
         if (this.davLast.length > 0) {
           Text('· 上次 ' + this.davLast)
             .fontSize(10)
-            .fontColor('#AAB4C4')
+            .fontColor(this.tc('#AAB4C4', '#7E7E86'))
         }
       }
       .padding({ top: 6, bottom: 20 })
@@ -1958,7 +1984,7 @@ struct Index {
     .height('100%')
     .padding({ top: this.safeTop, bottom: this.safeBottom })
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor('#DDE3EB')
+    .backgroundColor(this.tc('#DDE3EB', '#111114'))
   }
 
   // ── 编辑页 ─────────────────────────────────────────────────────
@@ -1968,8 +1994,8 @@ struct Index {
       .fontSize(15)
       .height(38)
       .width(48)
-      .backgroundColor(enabled ? '#E8E8E8' : '#F6F6F6')
-      .fontColor(enabled ? '#222222' : '#D8D8D8')
+      .backgroundColor(enabled ? this.tc('#E8E8E8', '#2E2E34') : this.tc('#F6F6F6', '#232328'))
+      .fontColor(enabled ? this.tc('#222222', '#E6E6E9') : this.tc('#D8D8D8', '#5A5A62'))
       .enabled(enabled)
       .onClick(act)
   }
@@ -1984,7 +2010,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
           Text('在这里编辑系统与地址；顺序请到站点页点「排序」调整')
             .fontSize(10)
-            .fontColor('#BBBBBB')
+            .fontColor(this.tc('#BBBBBB', '#6E6E76'))
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -1992,9 +2018,9 @@ struct Index {
         Button('返回')
           .fontSize(13)
           .height(32)
-          .backgroundColor('#FFFFFF')
-          .fontColor('#333333')
-          .border({ width: 1, color: '#E2E2E2' })
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+          .fontColor(this.tc('#333333', '#DDDDE1'))
+          .border({ width: 1, color: this.tc('#E2E2E2', '#33333A') })
           .onClick(() => {
             this.dbgText = '返回被点到';
             this.panelMode = 'list';
@@ -2013,7 +2039,7 @@ struct Index {
                   .height(42)
                   .fontSize(14)
                   .layoutWeight(1)
-                  .backgroundColor('#F2F3F5')
+                  .backgroundColor(this.tc('#F2F3F5', '#26262B'))
                   .onChange((v: string) => {
                     this.working[gi].name = v;
                   })
@@ -2022,7 +2048,7 @@ struct Index {
               .padding({ left: 12, right: 12, top: 12, bottom: 8 })
 
               Divider()
-                .color('#F2F2F2')
+                .color(this.tc('#F2F2F2', '#2A2A30'))
                 .strokeWidth(1)
                 .margin({ left: 12, right: 12 })
 
@@ -2031,7 +2057,7 @@ struct Index {
                   Row({ space: 8 }) {
                     Text('地址 ' + (ai + 1).toString())
                       .fontSize(12)
-                      .fontColor('#9A9A9A')
+                      .fontColor(this.tc('#9A9A9A', '#8A8A92'))
                       .layoutWeight(1)
                   }
                   .width('100%')
@@ -2040,7 +2066,7 @@ struct Index {
                     .height(40)
                     .fontSize(14)
                     .width('100%')
-                    .backgroundColor('#F7F7F7')
+                    .backgroundColor(this.tc('#F7F7F7', '#26262B'))
                     .onChange((v: string) => {
                       this.working[gi].items[ai].name = v;
                     })
@@ -2048,7 +2074,7 @@ struct Index {
                     .height(40)
                     .fontSize(14)
                     .width('100%')
-                    .backgroundColor('#F7F7F7')
+                    .backgroundColor(this.tc('#F7F7F7', '#26262B'))
                     .onChange((v: string) => {
                       this.working[gi].items[ai].url = v;
                     })
@@ -2057,7 +2083,7 @@ struct Index {
                       .height(40)
                       .fontSize(14)
                       .layoutWeight(1)
-                      .backgroundColor('#F7F7F7')
+                      .backgroundColor(this.tc('#F7F7F7', '#26262B'))
                       .onChange((v: string) => {
                         this.working[gi].items[ai].user = v;
                       })
@@ -2065,7 +2091,7 @@ struct Index {
                       .height(40)
                       .fontSize(14)
                       .layoutWeight(1)
-                      .backgroundColor('#F7F7F7')
+                      .backgroundColor(this.tc('#F7F7F7', '#26262B'))
                       .onChange((v: string) => {
                         this.working[gi].items[ai].pass = v;
                       })
@@ -2077,8 +2103,8 @@ struct Index {
                       .fontSize(12)
                       .height(34)
                       .layoutWeight(1)
-                      .backgroundColor(a.off ? '#0A59F7' : '#F2F2F2')
-                      .fontColor(a.off ? '#FFFFFF' : '#666666')
+                      .backgroundColor(a.off ? '#0A59F7' : this.tc('#F2F2F2', '#2A2A30'))
+                      .fontColor(a.off ? '#FFFFFF' : this.tc('#666666', '#A6A6AE'))
                       .onClick(() => {
                         this.toggleOff(gi, ai);
                       })
@@ -2086,8 +2112,8 @@ struct Index {
                       .fontSize(12)
                       .height(34)
                       .layoutWeight(1)
-                      .backgroundColor('#FDECEC')
-                      .fontColor('#CC3333')
+                      .backgroundColor(this.tc('#FDECEC', '#3A1E1E'))
+                      .fontColor(this.tc('#CC3333', '#FF8A8A'))
                       .onClick(() => {
                         this.removeAddress(gi, ai);
                       })
@@ -2098,8 +2124,8 @@ struct Index {
                 .padding(12)
                 .margin({ left: 12, right: 12, bottom: 10 })
                 .borderRadius(10)
-                .backgroundColor(a.off ? '#FAFAFA' : '#FFFFFF')
-                .border({ width: 1, color: '#DDE3EC' })
+                .backgroundColor(a.off ? this.tc('#FAFAFA', '#17171A') : this.tc('#FFFFFF', '#1C1C20'))
+                .border({ width: 1, color: this.tc('#DDE3EC', '#2E2E34') })
               }, (a: Address, ai: number) => (a.url ? a.url : '') + '#' + gi.toString() + '-' + ai.toString() + (a.off ? 'F' : 'T') + (a.link ? a.link : ''))
 
 
@@ -2108,9 +2134,9 @@ struct Index {
                   .fontSize(13)
                   .height(38)
                   .layoutWeight(1)
-                  .backgroundColor('#FFFFFF')
+                  .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
                   .fontColor('#0A59F7')
-                  .border({ width: 1, color: '#C8D8F8', style: BorderStyle.Dashed })
+                  .border({ width: 1, color: this.tc('#C8D8F8', '#2A3E63'), style: BorderStyle.Dashed })
                   .onClick(() => {
                     this.addAddress(gi);
                   })
@@ -2118,9 +2144,9 @@ struct Index {
                   .fontSize(13)
                   .height(38)
                   .width(120)
-                  .backgroundColor('#FDECEC')
-                  .fontColor('#CC3333')
-                  .border({ width: 1, color: '#F5C6C6' })
+                  .backgroundColor(this.tc('#FDECEC', '#3A1E1E'))
+                  .fontColor(this.tc('#CC3333', '#FF8A8A'))
+                  .border({ width: 1, color: this.tc('#F5C6C6', '#5A2A2A') })
                   .onClick(() => {
                     this.removeSystem(gi);
                   })
@@ -2131,9 +2157,9 @@ struct Index {
             .width('100%')
             .margin({ bottom: 16 })
             .borderRadius(14)
-            .backgroundColor(Color.White)
-            .border({ width: 1, color: '#E6E8EB' })
-            .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+            .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+            .border({ width: 1, color: this.tc('#E6E8EB', '#2E2E34') })
+            .shadow({ radius: 14, color: this.tc('#26000000', '#00000000'), offsetX: 0, offsetY: 3 })
             .clip(true)
             }
           }, (g: Group, gi: number) => (g.name ? g.name : '') + '#' + gi.toString() + '#' + (g.ver ? g.ver.toString() : '0'))
@@ -2159,7 +2185,7 @@ struct Index {
         .fontSize(14)
         .height(42)
         .width('100%')
-        .backgroundColor('#FFFFFF')
+        .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
         .fontColor('#0A59F7')
         .border({ width: 1, color: '#0A59F7', style: BorderStyle.Dashed })
         .margin({ left: 16, right: 16, bottom: 14 })
@@ -2173,8 +2199,8 @@ struct Index {
           .fontSize(15)
           .height(46)
           .layoutWeight(1)
-          .backgroundColor('#F0F0F0')
-          .fontColor('#444444')
+          .backgroundColor(this.tc('#F0F0F0', '#2E2E34'))
+          .fontColor(this.tc('#444444', '#CFCFD4'))
           .onClick(() => {
             this.panelMode = 'list';
           })
@@ -2193,7 +2219,7 @@ struct Index {
     .height('100%')
     .padding({ top: this.safeTop, bottom: this.safeBottom })
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor('#DDE3EB')
+    .backgroundColor(this.tc('#DDE3EB', '#111114'))
   }
 
   // ── 连接中页 ───────────────────────────────────────────────────
@@ -2203,14 +2229,14 @@ struct Index {
       Blank().layoutWeight(3)
       Image($r('app.media.startIcon')).width(96).height(96)
       LoadingProgress().width(42).height(42).color('#0A59F7').margin({ top: 20 })
-      Text(this.hint).fontSize(14).fontColor('#888888').margin({ top: 14 })
-      Text(BUILD_TAG).fontSize(10).fontColor('#CCCCCC').margin({ top: 6 })
+      Text(this.hint).fontSize(14).fontColor(this.tc('#888888', '#9C9CA4')).margin({ top: 14 })
+      Text(BUILD_TAG).fontSize(10).fontColor(this.tc('#CCCCCC', '#6E6E76')).margin({ top: 6 })
       Blank().layoutWeight(2)
       Button('站点')
         .fontSize(15)
         .height(44)
         .width(180)
-        .backgroundColor('#EFEFEF')
+        .backgroundColor(this.tc('#EFEFEF', '#2E2E34'))
         .fontColor('#0A59F7')
         .onClick(() => {
           this.backToPicker();
@@ -2220,7 +2246,7 @@ struct Index {
     .width('100%')
     .height('100%')
     .padding({ top: this.safeTop, bottom: this.safeBottom })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
   }
 
   // ── 站点备份页（WebDAV） ────────────────────────────────────────
@@ -2235,7 +2261,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
           Text('WebDAV · ' + DAV_DIR)
             .fontSize(10)
-            .fontColor('#BBBBBB')
+            .fontColor(this.tc('#BBBBBB', '#6E6E76'))
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -2261,14 +2287,14 @@ struct Index {
             Text('WebDAV 服务器')
               .fontSize(13)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#2B2B2B')
+              .fontColor(this.tc('#2B2B2B', '#E6E6E9'))
               .width('100%')
 
             TextInput({ text: this.davUrl, placeholder: 'http://192.168.1.10:8080' })
               .height(42)
               .fontSize(14)
               .width('100%')
-              .backgroundColor('#F2F3F5')
+              .backgroundColor(this.tc('#F2F3F5', '#26262B'))
               .onChange((v: string) => {
                 this.davUrl = v;
               })
@@ -2277,7 +2303,7 @@ struct Index {
               .height(42)
               .fontSize(14)
               .width('100%')
-              .backgroundColor('#F2F3F5')
+              .backgroundColor(this.tc('#F2F3F5', '#26262B'))
               .onChange((v: string) => {
                 this.davUser = v;
               })
@@ -2287,7 +2313,7 @@ struct Index {
               .height(42)
               .fontSize(14)
               .width('100%')
-              .backgroundColor('#F2F3F5')
+              .backgroundColor(this.tc('#F2F3F5', '#26262B'))
               .onChange((v: string) => {
                 this.davPass = v;
               })
@@ -2296,10 +2322,10 @@ struct Index {
               Column({ space: 2 }) {
                 Text('自动备份')
                   .fontSize(14)
-                  .fontColor('#1F1F1F')
+                  .fontColor(this.tc('#1F1F1F', '#E6E6E9'))
                 Text('站点有改动时自动上传（延迟 8 秒）')
                   .fontSize(10)
-                  .fontColor('#AAAAAA')
+                  .fontColor(this.tc('#AAAAAA', '#7E7E86'))
               }
               .layoutWeight(1)
               .alignItems(HorizontalAlign.Start)
@@ -2316,9 +2342,9 @@ struct Index {
           .width('100%')
           .padding(14)
           .borderRadius(14)
-          .backgroundColor(Color.White)
-          .border({ width: 1, color: '#D3DAE4' })
-          .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+          .border({ width: 1, color: this.tc('#D3DAE4', '#2E2E34') })
+          .shadow({ radius: 14, color: this.tc('#26000000', '#00000000'), offsetX: 0, offsetY: 3 })
 
           // 操作卡片
           Column({ space: 10 }) {
@@ -2327,7 +2353,7 @@ struct Index {
               .fontSize(14)
               .height(42)
               .width('100%')
-              .backgroundColor('#FFFFFF')
+              .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
               .fontColor('#0A59F7')
               .border({ width: 1, color: '#0A59F7' })
               .enabled(!this.davBusy && !this.davTesting)
@@ -2353,7 +2379,7 @@ struct Index {
                 .fontSize(14)
                 .height(44)
                 .layoutWeight(1)
-                .backgroundColor('#FFFFFF')
+                .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
                 .fontColor('#0A59F7')
                 .border({ width: 1, color: '#0A59F7' })
                 .enabled(!this.davBusy && !this.davTesting)
@@ -2386,34 +2412,34 @@ struct Index {
                 if (this.davProgressText.length > 0) {
                   Text(this.davProgressText)
                     .fontSize(11)
-                    .fontColor('#8A94A6')
+                    .fontColor(this.tc('#8A94A6', '#9C9CA4'))
                     .width('100%')
                 }
               }
               .width('100%')
               .padding(10)
               .borderRadius(10)
-              .backgroundColor('#F0F5FF')
+              .backgroundColor(this.tc('#F0F5FF', '#182740'))
             }
 
             Text(this.davMsg.length > 0 ? this.davMsg : '备份目录会在首次备份时自动创建')
               .fontSize(12)
-              .fontColor(this.davMsg.indexOf('失败') >= 0 ? '#CC3333' : '#666666')
+              .fontColor(this.davMsg.indexOf('失败') >= 0 ? this.tc('#CC3333', '#FF8A8A') : this.tc('#666666', '#A6A6AE'))
               .width('100%')
 
             if (this.davLast.length > 0) {
               Text('上次成功备份：' + this.davLast)
                 .fontSize(11)
-                .fontColor('#999999')
+                .fontColor(this.tc('#999999', '#8A8A92'))
                 .width('100%')
             }
           }
           .width('100%')
           .padding(14)
           .borderRadius(14)
-          .backgroundColor(Color.White)
-          .border({ width: 1, color: '#D3DAE4' })
-          .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+          .border({ width: 1, color: this.tc('#D3DAE4', '#2E2E34') })
+          .shadow({ radius: 14, color: this.tc('#26000000', '#00000000'), offsetX: 0, offsetY: 3 })
 
           // 自检日志（测试连接后出现）
           if (this.davTestLog.length > 0) {
@@ -2422,12 +2448,12 @@ struct Index {
                 Text(this.davTesting ? '正在自检…' : (this.davTestOk ? '自检结果：通过' : '自检结果：未通过'))
                   .fontSize(13)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor(this.davTesting ? '#0A59F7' : (this.davTestOk ? '#22BB55' : '#CC3333'))
+                  .fontColor(this.davTesting ? '#0A59F7' : (this.davTestOk ? this.tc('#22BB55', '#43D17A') : this.tc('#CC3333', '#FF8A8A')))
                   .layoutWeight(1)
                 if (!this.davTesting && this.davTestLog.length > 0) {
                   Text('清除')
                     .fontSize(12)
-                    .fontColor('#8A94A6')
+                    .fontColor(this.tc('#8A94A6', '#9C9CA4'))
                     .onClick(() => {
                       this.davTestLog = '';
                       this.davTestOk = false;
@@ -2438,16 +2464,16 @@ struct Index {
 
               Text(this.davTestLog)
                 .fontSize(11)
-                .fontColor('#4A5568')
+                .fontColor(this.tc('#4A5568', '#B4B4BC'))
                 .width('100%')
                 .lineHeight(18)
             }
             .width('100%')
             .padding(12)
             .borderRadius(14)
-            .backgroundColor(Color.White)
-            .border({ width: 1, color: '#D3DAE4' })
-            .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+            .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+            .border({ width: 1, color: this.tc('#D3DAE4', '#2E2E34') })
+            .shadow({ radius: 14, color: this.tc('#26000000', '#00000000'), offsetX: 0, offsetY: 3 })
           }
 
           // 说明卡片
@@ -2455,27 +2481,27 @@ struct Index {
             Text('备份文件')
               .fontSize(13)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#2B2B2B')
+              .fontColor(this.tc('#2B2B2B', '#E6E6E9'))
               .width('100%')
             Text('· 主文件：' + DAV_DIR + DAV_FILE + '（固定名，可在浏览器直接下载）')
               .fontSize(11)
-              .fontColor('#777777')
+              .fontColor(this.tc('#777777', '#A6A6AE'))
               .width('100%')
             Text('· 副本：' + DAV_DIR + '/dsh-sites-<时间戳>.json（每次备份留一份历史）')
               .fontSize(11)
-              .fontColor('#777777')
+              .fontColor(this.tc('#777777', '#A6A6AE'))
               .width('100%')
             Text('· 内容含系统、地址、账号密码（自动登录用），请妥善保管该目录权限。')
               .fontSize(11)
-              .fontColor('#CC6633')
+              .fontColor(this.tc('#CC6633', '#E08A5A'))
               .width('100%')
           }
           .width('100%')
           .padding(14)
           .borderRadius(14)
-          .backgroundColor(Color.White)
-          .border({ width: 1, color: '#D3DAE4' })
-          .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+          .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
+          .border({ width: 1, color: this.tc('#D3DAE4', '#2E2E34') })
+          .shadow({ radius: 14, color: this.tc('#26000000', '#00000000'), offsetX: 0, offsetY: 3 })
           .margin({ bottom: 20 })
         }
         .width('100%')
@@ -2490,7 +2516,7 @@ struct Index {
     .height('100%')
     .padding({ top: this.safeTop, bottom: this.safeBottom })
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor('#DFE4EB')
+    .backgroundColor(this.tc('#DFE4EB', '#111114'))
   }
 
   build() {
@@ -2708,7 +2734,7 @@ struct Index {
     .width('100%')
     .height('100%')
     .alignContent(Alignment.TopStart)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(this.tc('#FFFFFF', '#1C1C20'))
     // 记录窗口宽度，供折叠屏断点适配使用（外屏≈540vp / 内屏≈782vp）
     .onAreaChange((oldV: Area, newV: Area) => {
       const w = Number(newV.width);
