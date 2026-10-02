@@ -1346,7 +1346,7 @@ struct Index {
   //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var timer=null,lastPath=null,prefetch=null,shown=false,errSig="";'
+      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="";'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1358,17 +1358,28 @@ struct Index {
       + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
       + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
       + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
-      + 'function closeDshTab(name){try{if(!name)return false;var cand=null,i;'
-      + 'var sel=document.querySelectorAll("[aria-selected=true]");'
-      + 'for(i=0;i<sel.length;i++){if((sel[i].innerText||"").indexOf(name)>=0){cand=sel[i];break;}}'
-      + 'if(!cand){var ts=document.querySelectorAll("[data-dockkit-tab]");'
-      + 'for(i=0;i<ts.length;i++){if((ts[i].innerText||"").indexOf(name)>=0){cand=ts[i];break;}}}'
+      // 精确关掉"显示着错误"的那个页签：从错误元素往上找 data-dockkit-content 拿到页签 id，
+      // 再点对应的 data-dockkit-tab-close —— 与页签标题无关，最可靠。
+      + 'function closeErrTab(){try{'
+      + 'var ers=document.querySelectorAll("[data-textpreview-state=loading]");'
+      + 'for(var i=0;i<ers.length;i++){var n=ers[i],d=0;'
+      + 'while(n&&n!==document&&d<24){d++;'
+      + 'if(n.getAttribute){var id=n.getAttribute("data-dockkit-content");'
+      + 'if(id){var cb=document.querySelector("[data-dockkit-tab-close=\\""+id+"\\"]");'
+      + 'if(cb){cb.click();return true;}}}'
+      + 'n=n.parentElement;}}}catch(e){}return false;}'
+      // 按文件名兜底：**只在 dock 页签里找**。
+      // 【踩过的坑】原来先用 [aria-selected=true] 找，而那个选择器会匹配到
+      //   会话行、"对话"页签等无关元素，于是认错目标、真正的报错页签关不掉 ——
+      //   表现就是"上下文打开的文件，关闭查看器后原版页签还在"（用户反馈）。
+      + 'function closeDshTab(name){try{if(!name)return false;'
+      + 'var ts=document.querySelectorAll("[data-dockkit-tab]"),cand=null,i,t;'
+      + 'for(i=0;i<ts.length;i++){t=(ts[i].innerText||"").trim();if(t===name){cand=ts[i];break;}}'
+      + 'if(!cand){for(i=0;i<ts.length;i++){t=(ts[i].innerText||"").trim();'
+      + 'if(t&&(name.indexOf(t)>=0||t.indexOf(name)>=0)){cand=ts[i];break;}}}'
       + 'if(!cand)return false;'
       + 'var id=cand.getAttribute("data-dockkit-tab");'
       + 'if(id){var cb=document.querySelector("[data-dockkit-tab-close=\\""+id+"\\"]");if(cb){cb.click();return true;}}'
-      + 'var bs=cand.querySelectorAll("button");'
-      + 'for(i=0;i<bs.length;i++){var al=bs[i].getAttribute("aria-label")||"";var tx=(bs[i].innerText||"").trim();'
-      + 'if(al.indexOf("关闭")>=0||al.indexOf("Close")>=0||tx==="\\u00d7"||tx==="\\u2715"){bs[i].click();return true;}}'
       + '}catch(e){}return false;}'
       + 'function rd(path,offset,cb){var sc=getScope();'
       + 'if(!sc){cb(null);return;}'
@@ -1380,7 +1391,9 @@ struct Index {
       + '.catch(function(e){cb(null);});}'
       + 'function close(){var o=document.getElementById("dsh-filefix");'
       + 'if(o&&o.parentNode)o.parentNode.removeChild(o);'
-      + 'if(shown){shown=false;try{window.dshShell.setFileFix(0);}catch(e){}}}'
+      + 'if(shown){shown=false;try{window.dshShell.setFileFix(0);}catch(e){}}'
+      + 'closeErrTab();if(lastUsed)closeDshTab(base(lastUsed));'
+      + 'setTimeout(function(){closeErrTab();if(lastUsed)closeDshTab(base(lastUsed));},350);}'
       + 'window.__dshCloseFileFix=close;'
       + 'function render(v,path){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
@@ -1471,7 +1484,9 @@ struct Index {
       + 'render({text:lines.join("\\n"),absolutePath:"诊断"},null);}'
       // 首次处理：优先用文件树点击时的预取（那条路径几乎无等待）
       + 'function show(path,preset){'
-      + 'var done=function(v,used){if(v){render(v,used||path);closeDshTab(base(used||path));}'
+      + 'var done=function(v,used){if(v){lastUsed=used||path;render(v,lastUsed);'
+      + 'closeErrTab();closeDshTab(base(lastUsed));'
+      + 'setTimeout(function(){closeErrTab();closeDshTab(base(lastUsed));},350);}'
       + 'else{showDiag(candidates());}};'
       + 'if(preset&&prefetch){var pv=prefetch;prefetch=null;done(pv,path);return;}'
       + 'if(path){done(null,path);rd(path,1,function(v){done(v,path);});return;}'
