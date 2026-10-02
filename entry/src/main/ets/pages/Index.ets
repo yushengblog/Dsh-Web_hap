@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3652'
+const BUILD_TAG: string = '构建 v10-01-3662'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1373,7 +1373,12 @@ struct Index {
       + 'var ov=window.__dshRightOpen()?1:0;if(ov!==lastOv){lastOv=ov;window.dshShell.setOverlay(ov);}'
       + 'var dg=window.__dshDialogOpen()?1:0;if(dg!==lastDlg){lastDlg=dg;window.dshShell.setDialog(dg);}'
       + '}catch(e){}}'
-      + 'setTimeout(tick,300);setInterval(tick,1000);'
+      // ★ 只靠轮询有竞态：用户"刚打开右侧栏就立刻侧滑返回"时，
+      //   原生还没收到 setOverlay(1)，onBackPress 就已经跑了 ——
+      //   表现就是**侧滑关闭右侧栏时灵时不灵**（用户实测反馈）。
+      //   补一路"点击后立刻重算"：打开右侧栏/弹窗都是点击触发的，点完 80ms 就上报。
+      + 'document.addEventListener("click",function(){setTimeout(tick,80);},true);'
+      + 'setTimeout(tick,300);setInterval(tick,600);'
       + '})()');
     // ⑥ 「当前连接情况」行：插进网页左侧栏，点它弹出站点切换面板。
     //    文字**不再轮询拉取**（用户要求：不切站点就没必要反复问原生）；
