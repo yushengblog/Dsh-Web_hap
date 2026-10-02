@@ -17,8 +17,14 @@ const PHASE_PICKER: number = 0;
 const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
+// 网页增强总开关。
+// true  = 正常运行（注入自动登录、站点快速切换行、状态上报等）
+// false = 诊断模式：完全不注入。用于确认"手机端 DSH 的某些功能失灵"是不是本 App 的注入引起的。
+//         （实测：手机自带浏览器功能正常、本 App 不正常 → 先靠这个开关一刀切开）
+const INJECT_ENABLED: boolean = true;
+
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3662'
+const BUILD_TAG: string = '构建 v10-01-3672'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -144,6 +150,11 @@ struct Index {
   @State injectLen: number = 0;
   @State lastErr: string = '';
   @State injectCount: number = 0;
+  // ── 诊断用（排查"手机端文件查看器打不开"）──
+  // webConsoleErr：网页控制台里的报错，直接显示在界面上，便于真机取证（不用连电脑）
+  @State webConsoleErr: string = '';
+  // 网页增强总开关：置 false 可完全停掉所有注入，用来判断"是不是我的注入引起的"
+  private injectEnabled: boolean = INJECT_ENABLED;
 
   // ── WebDAV 备份配置与状态 ──
   @State davUrl: string = '';
@@ -1272,6 +1283,9 @@ struct Index {
   }
 
   injectAll(): void {
+    if (!this.injectEnabled) {
+      return;
+    }
     // ① 上报左侧栏宽度 + 网页真实配色（原生状态栏双色块据此上色 → 深色模式自动跟随）
     //    · sidebarCol 的背景色 = 左块颜色
     //    · centerCol 的背景色（继承自 frame）= 右块颜色
@@ -2664,6 +2678,22 @@ struct Index {
             }
           }
         })
+        // 诊断：把网页控制台里的报错抓下来存成状态，直接显示在界面上
+        // （真机排查时不用连电脑就能取证）
+        .onConsole((event) => {
+          try {
+            if (event && event.message) {
+              if (event.message.getMessageLevel() === MessageLevel.Error) {
+                const one = '[' + event.message.getSourceId() + ':'
+                  + event.message.getLineNumber().toString() + '] '
+                  + event.message.getMessage();
+                this.webConsoleErr = one.length > 240 ? one.substring(0, 240) : one;
+              }
+            }
+          } catch (e) {
+          }
+          return true;
+        })
         .onPageEnd(() => {
           if (this.phase === PHASE_LOADING) {
             // 同样不再因 loadFailed 拒绝切页：页面能显示就该让用户看到，
@@ -2759,6 +2789,37 @@ struct Index {
             }
           }
         })
+
+      // 诊断条：网页控制台报错（有才显示，点「清除」可关）
+      // 放在最后 → 层级最高，一定看得见；用来在真机上直接取证，不用连电脑。
+      if (this.webConsoleErr.length > 0) {
+        Column({ space: 3 }) {
+          Row({ space: 8 }) {
+            Text('网页报错')
+              .fontSize(10)
+              .fontColor('#FFFFFF')
+              .backgroundColor('#CC0000')
+              .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+              .borderRadius(4)
+            Text('清除')
+              .fontSize(11)
+              .fontColor('#BBD0FF')
+              .onClick(() => {
+                this.webConsoleErr = '';
+              })
+            Blank()
+          }
+          .width('100%')
+
+          Text(this.webConsoleErr)
+            .fontSize(10)
+            .fontColor('#FFFFFF')
+            .width('100%')
+        }
+        .width('100%')
+        .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+        .backgroundColor('#99000000')
+      }
 
       // 状态栏区域**不再单独画色条**（用户定稿）。
       // 窗口是 setWindowLayoutFullScreen(true)，所以状态栏那一条露出来的
