@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3712'
+const BUILD_TAG: string = '构建 v10-01-3722'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -2681,17 +2681,21 @@ struct Index {
         Web({ src: EMPTY_URL, controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(true)
-        .imageAccess(true)
-        .fileAccess(true)
-        .mediaPlayGestureAccess(true)
-        .mixedMode(MixedMode.All)
-        .zoomAccess(false)
+        // [诊断临时移除] .imageAccess(true)
+        // [诊断临时移除] .fileAccess(true)
+        // [诊断临时移除] .mediaPlayGestureAccess(true)
+        // [诊断临时移除] .mixedMode(MixedMode.All)
+        // [诊断临时移除] .zoomAccess(false)
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
           methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
+        // [诊断] 无凭据时**不再 cancel()** —— cancel() 是唯一能"静默掐死请求"的配置，
+        //        怀疑它会把 DSH 客户端的某些请求（如 remote.mux 相关）打断，
+        //        导致 file 资源提供方因缺少 remote.workspaceFiles 依赖而不注册。
+        //        现在改为交给平台默认处理（return false）。
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
           if (event) {
             const g = this.groups[this.curG];
@@ -2700,12 +2704,11 @@ struct Index {
               this.addLog('自动填写服务器认证');
               this.lastErr = 'AUTH-OK';
               event.handler.confirm(a.user, a.pass);
-            } else {
-              this.lastErr = 'AUTH-NOCRED';
-              event.handler.cancel();
+              return true;
             }
+            this.lastErr = 'AUTH-NOCRED-NOCANCEL';
           }
-          return true;
+          return false;
         })
         .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
           if (event) {
