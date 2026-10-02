@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3732'
+const BUILD_TAG: string = '构建 v10-01-3712'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1300,6 +1300,88 @@ struct Index {
     }, 250);
   }
 
+  // ── 自建文件查看器 ─────────────────────────────────────────────
+  // 背景：手机端 DSH 的文件查看器对 dsh-resource://file/… 一律显示
+  //   "文件资源服务不可用"，而 changes-review 类型资源**正常** ——
+  //   说明 DSH 客户端的 file 资源提供方在本 App 里没注册
+  //   （源码写明它依赖 resources / remote / remote.workspaceFiles 三者）。
+  //   已实测排除：注入脚本、JS 报错、窄屏、缺新 API、UA、插件未加载、Web 组件属性（9 处）。
+  // 方案：不再依赖那个提供方。用户点文件树里的文件后，若 DSH 报"不可用"，
+  //   本脚本用**同源 fetch** 直接调 /api/workspaceFiles/read 取回内容，
+  //   用自己的浮层渲染（带分页、深色适配、关闭按钮）。cookie 由 WebView 自动携带。
+  // 接口契约（实测确认）：
+  //   POST /api/workspaceFiles/read
+  //   {"type":"client-request","rpcId":"…","method":"workspaceFiles/read",
+  //    "payload":{"args":{"workspaceFileScopeId":"session-…","path":"相对路径",
+  //                       "range":{"offset":1,"limit":2000}}}}
+  //   → {"result":{"ok":true,"value":{absolutePath,bytes,offset,lines,eof,text}}}
+  //   ⚠️ offset 是**行号且最小为 1**（传 0 返回 bad-request）。
+  injectFileFix(): void {
+    this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
+      + 'var scope=null,lastPath=null,timer=null;'
+      + 'function sn(u,o){try{var url=(typeof u==="string")?u:((u&&u.url)||"");'
+      + 'if(url.indexOf("/api/workspaceFiles/")<0)return;var b=o&&o.body;'
+      + 'if(typeof b==="string"){var m=b.match(/"workspaceFileScopeId"\\s*:\\s*"([^"]+)"/);if(m){scope=m[1];}}}catch(e){}}'
+      + 'var of=window.fetch;if(of){window.fetch=function(u,o){sn(u,o);return of.apply(this,arguments);};}'
+      + 'try{var oo=XMLHttpRequest.prototype.open,os=XMLHttpRequest.prototype.send;'
+      + 'XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments);};'
+      + 'XMLHttpRequest.prototype.send=function(b){try{sn(this.__u,{body:b});}catch(e){}return os.apply(this,arguments);};}catch(e){}'
+      + 'function dark(){try{var el=document.querySelector("[class*=sidebarCol]")||document.body;'
+      + 'var n=el,d=0,c=null;while(n&&n!==document.documentElement&&d<12){d++;'
+      + 'var x=getComputedStyle(n).backgroundColor;'
+      + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
+      + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
+      + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
+      + 'function mk(id){var o=document.getElementById(id);if(o&&o.parentNode)o.parentNode.removeChild(o);return o;}'
+      + 'function open(text,path,more){var dk=dark();'
+      + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",hb=dk?"#1c1c20":"#fafafa",sub=dk?"#a6a6ae":"#666666";'
+      + 'mk("dsh-filefix");'
+      + 'var w=document.createElement("div");w.id="dsh-filefix";'
+      + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
+      + 'var h=document.createElement("div");h.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid "+bd+";background:"+hb+";flex:0 0 auto;";'
+      + 'var t=document.createElement("div");t.textContent=path;t.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:"+sub+";";'
+      + 'var b=document.createElement("button");b.textContent="关闭";'
+      + 'b.style.cssText="border:1px solid "+bd+";background:"+bg+";color:"+fg+";border-radius:6px;padding:5px 12px;font-size:13px;";'
+      + 'b.onclick=function(){if(w.parentNode)w.parentNode.removeChild(w);};'
+      + 'h.appendChild(t);h.appendChild(b);'
+      + 'var pre=document.createElement("pre");'
+      + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:12px;line-height:1.55;";'
+      + 'pre.textContent=text;w.appendChild(h);w.appendChild(pre);'
+      + 'if(more){var ft=document.createElement("div");'
+      + 'ft.style.cssText="flex:0 0 auto;padding:8px;text-align:center;border-top:1px solid "+bd+";background:"+hb+";";'
+      + 'var mb=document.createElement("button");mb.textContent="加载更多";'
+      + 'mb.style.cssText="border:1px solid "+bd+";background:"+bg+";color:"+fg+";border-radius:6px;padding:7px 16px;font-size:13px;";'
+      + 'mb.onclick=function(){mb.disabled=true;mb.textContent="加载中…";'
+      + 'more(function(extra,still){pre.textContent=pre.textContent+extra;'
+      + 'mb.disabled=!still;mb.textContent=still?"加载更多":"已到末尾";});};'
+      + 'ft.appendChild(mb);w.appendChild(ft);}'
+      + 'document.body.appendChild(w);}'
+      + 'function rd(path,offset,cb){'
+      + 'if(!scope){window.dshShell.dbg("自建查看器：还没拿到 workspaceFileScopeId，请先在右侧栏打开一次「文件」再点文件");return;}'
+      + 'var body=JSON.stringify({type:"client-request",rpcId:"ff-"+Date.now()+"-"+Math.random().toString(36).slice(2),'
+      + 'method:"workspaceFiles/read",payload:{args:{workspaceFileScopeId:scope,path:path,range:{offset:offset,limit:2000}}}});'
+      + 'fetch("/api/workspaceFiles/read",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:body})'
+      + '.then(function(r){return r.json();})'
+      + '.then(function(j){var v=j&&j.result&&j.result.value;'
+      + 'if(!v){var e=(j&&j.result&&j.result.error)||{};window.dshShell.dbg("自建查看器读取失败："+(e.code||"")+" "+(e.message||""));return;}cb(v);})'
+      + '.catch(function(e){window.dshShell.dbg("自建查看器异常："+e);});}'
+      + 'function findErr(){try{var ds=document.querySelectorAll("[data-textpreview-state=loading]");'
+      + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();'
+      + 'if(r.width>0&&r.height>0&&(ds[i].innerText||"").indexOf("不可用")>=0)return true;}}catch(e){}return false;}'
+      + 'function watch(){if(timer){clearInterval(timer);}var n=0;'
+      + 'timer=setInterval(function(){n++;'
+      + 'if(findErr()&&lastPath){clearInterval(timer);timer=null;var p=lastPath;'
+      + 'rd(p,1,function(v){if(!v||typeof v.text!=="string")return;'
+      + 'var off=(v.offset||1)+(v.lines||0);'
+      + 'window.dshShell.dbg("已用自建查看器打开 "+v.absolutePath);'
+      + 'open(v.text,v.absolutePath,(v.eof===false)?function(more){'
+      + 'rd(p,off,function(v2){if(!v2||typeof v2.text!=="string"){more("",false);return;}more(v2.text,v2.eof===false);});}:null);});return;}'
+      + 'if(n>14||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},350);}'
+      + 'document.addEventListener("click",function(e){try{var n=e.target;while(n&&n!==document){'
+      + 'if(n.getAttribute&&n.getAttribute("data-files-entry")==="file"&&n.getAttribute("data-files-path")){'
+      + 'lastPath=n.getAttribute("data-files-path");watch();break;}n=n.parentElement;}}catch(x){}},true);'
+      + '})()');
+  }
   injectAll(): void {
     // 诊断②：上报引擎版本 + 关键 Web API 支持情况。
     // 用途：手机端「文件资源服务不可用」在 Chromium(Edge) 上正常、在本 App 的 ArkWeb 上失败，
@@ -1344,6 +1426,8 @@ struct Index {
       + '+" | 失败码:"+(c?c.getAttribute("data-files-code"):"-")'
       + '+" | 预览url:"+(u?u.getAttribute("data-textpreview-url"):"-"));'
       + '}catch(e){}},1500);})()');
+    // 自建文件查看器：始终启用（这是"文件打不开"的兜底，不受诊断开关影响）
+    this.injectFileFix();
     if (!this.injectEnabled) {
       return;
     }
@@ -2681,21 +2765,17 @@ struct Index {
         Web({ src: EMPTY_URL, controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(true)
-        // [诊断临时移除] .imageAccess(true)
-        // [诊断临时移除] .fileAccess(true)
-        // [诊断临时移除] .mediaPlayGestureAccess(true)
-        // [诊断临时移除] .mixedMode(MixedMode.All)
-        // [诊断临时移除] .zoomAccess(false)
+        .imageAccess(true)
+        .fileAccess(true)
+        .mediaPlayGestureAccess(true)
+        .mixedMode(MixedMode.All)
+        .zoomAccess(false)
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
           methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
-        // [诊断] 无凭据时**不再 cancel()** —— cancel() 是唯一能"静默掐死请求"的配置，
-        //        怀疑它会把 DSH 客户端的某些请求（如 remote.mux 相关）打断，
-        //        导致 file 资源提供方因缺少 remote.workspaceFiles 依赖而不注册。
-        //        现在改为交给平台默认处理（return false）。
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
           if (event) {
             const g = this.groups[this.curG];
@@ -2704,11 +2784,12 @@ struct Index {
               this.addLog('自动填写服务器认证');
               this.lastErr = 'AUTH-OK';
               event.handler.confirm(a.user, a.pass);
-              return true;
+            } else {
+              this.lastErr = 'AUTH-NOCRED';
+              event.handler.cancel();
             }
-            this.lastErr = 'AUTH-NOCRED-NOCANCEL';
           }
-          return false;
+          return true;
         })
         .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
           if (event) {
@@ -2741,7 +2822,7 @@ struct Index {
               this.watchWhiteScreen();
               this.visited = true;
               this.saveStore();
-              // [诊断临时移除] this.clearWebHistory();
+              this.clearWebHistory();
             }
           }
         })
@@ -2770,7 +2851,7 @@ struct Index {
               this.watchWhiteScreen();
             this.visited = true;
             this.saveStore();
-              // [诊断临时移除] this.clearWebHistory();
+            this.clearWebHistory();
           }
           // 上报左侧栏实时宽度，让状态栏双色块跟随（收起/展开都要跟）
           this.injectAll();
@@ -2811,7 +2892,7 @@ struct Index {
         .height('100%')
         // 不再向上扩展安全区：向上扩展会让网页内容整体上顶（logo 会被状态栏块盖住），
       // 状态栏那一块改由上面的双色 Row 负责填充。
-        // [诊断临时移除] .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
       .padding({ top: this.safeTop })
       }
       .width('100%')
@@ -2820,42 +2901,42 @@ struct Index {
       //（表现就是 logo 和侧栏切换按钮"消失"）。这是布局级下移，和 Web.padding 不同。
       .padding({ top: this.safeTop })
 
-        // [诊断临时移除] // 隐藏的探测 Web（后台依次真加载每条地址）
-        // [诊断临时移除] Web({ src: EMPTY_URL, controller: this.probeController })
-        // [诊断临时移除] .javaScriptAccess(true)
-        // [诊断临时移除] .width(1)
-        // [诊断临时移除] .height(1)
-        // [诊断临时移除] .opacity(0)
-        // [诊断临时移除] .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
-        // [诊断临时移除] if (event) {
-        // [诊断临时移除] const g = this.groups[this.probeG];
-        // [诊断临时移除] const a = (g && g.items && g.items[this.probeI]) ? g.items[this.probeI] : null;
-        // [诊断临时移除] if (a && a.user && a.user.length > 0) {
-        // [诊断临时移除] event.handler.confirm(a.user, a.pass);
-        // [诊断临时移除] } else {
-        // [诊断临时移除] this.lastErr = 'AUTH-NOCRED';
-        // [诊断临时移除] event.handler.cancel();
-        // [诊断临时移除] }
-        // [诊断临时移除] }
-        // [诊断临时移除] return true;
-        // [诊断临时移除] })
-        // [诊断临时移除] .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
-        // [诊断临时移除] if (event) {
-        // [诊断临时移除] this.probeSslIgnored = true;
-        // [诊断临时移除] event.handler.handleConfirm();
-        // [诊断临时移除] }
-        // [诊断临时移除] })
-        // [诊断临时移除] .onPageEnd(() => {
-        // [诊断临时移除] this.onProbeEnd();
-        // [诊断临时移除] })
-        // [诊断临时移除] .onErrorReceive((event) => {
-        // [诊断临时移除] if (event) {
-        // [诊断临时移除] const c = event.error.getErrorCode();
-        // [诊断临时移除] if (c !== -3) {
-        // [诊断临时移除] this.probeHadError = true;
-        // [诊断临时移除] }
-        // [诊断临时移除] }
-        // [诊断临时移除] })
+      // 隐藏的探测 Web（后台依次真加载每条地址）
+      Web({ src: EMPTY_URL, controller: this.probeController })
+        .javaScriptAccess(true)
+        .width(1)
+        .height(1)
+        .opacity(0)
+        .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
+          if (event) {
+            const g = this.groups[this.probeG];
+            const a = (g && g.items && g.items[this.probeI]) ? g.items[this.probeI] : null;
+            if (a && a.user && a.user.length > 0) {
+              event.handler.confirm(a.user, a.pass);
+            } else {
+              this.lastErr = 'AUTH-NOCRED';
+              event.handler.cancel();
+            }
+          }
+          return true;
+        })
+        .onSslErrorEventReceive((event: OnSslErrorEventReceiveEvent) => {
+          if (event) {
+            this.probeSslIgnored = true;
+            event.handler.handleConfirm();
+          }
+        })
+        .onPageEnd(() => {
+          this.onProbeEnd();
+        })
+        .onErrorReceive((event) => {
+          if (event) {
+            const c = event.error.getErrorCode();
+            if (c !== -3) {
+              this.probeHadError = true;
+            }
+          }
+        })
 
       // 诊断条：网页控制台报错（有才显示，点「清除」可关）
       // 放在最后 → 层级最高，一定看得见；用来在真机上直接取证，不用连电脑。
@@ -2944,5 +3025,3 @@ struct Index {
     })
   }
 }
-
-// [诊断临时移除] 以上三处均为定位"文件资源服务不可用"的临时改动，定位后恢复。
