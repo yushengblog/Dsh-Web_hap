@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3692'
+const BUILD_TAG: string = '构建 v10-01-3702'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1301,7 +1301,26 @@ struct Index {
   }
 
   injectAll(): void {
-    // ── 诊断注入（不受 INJECT_ENABLED 影响）──
+    // 诊断②：上报引擎版本 + 关键 Web API 支持情况。
+    // 用途：手机端「文件资源服务不可用」在 Chromium(Edge) 上正常、在本 App 的 ArkWeb 上失败，
+    //   需要知道 ArkWeb 到底缺哪个 API —— 这类缺失常被 .catch(()=>{}) 吞掉，表现为"静默失败、请求根本不发"。
+    this.js('(function(){if(window.__dshUA){return;}window.__dshUA=1;'
+      + 'setTimeout(function(){try{var o=[];'
+      + 'function t(n,f){try{o.push(n+"="+(f()?"Y":"N"));}catch(e){o.push(n+"=E");}}'
+      + 'o.push("UA:"+(navigator.userAgent||""));'
+      + 't("AS.timeout",function(){return typeof AbortSignal!=="undefined"&&!!AbortSignal.timeout;});'
+      + 't("AS.any",function(){return typeof AbortSignal!=="undefined"&&!!AbortSignal.any;});'
+      + 't("sClone",function(){return typeof structuredClone==="function";});'
+      + 't("hasOwn",function(){return typeof Object.hasOwn==="function";});'
+      + 't("at",function(){return typeof [].at==="function";});'
+      + 't("canParse",function(){return typeof URL.canParse==="function";});'
+      + 't("uuid",function(){return !!(window.crypto&&window.crypto.randomUUID);});'
+      + 't("rIC",function(){return typeof requestIdleCallback==="function";});'
+      + 't("Offscr",function(){return typeof OffscreenCanvas==="function";});'
+      + 't("idb",function(){return !!window.indexedDB;});'
+      + 't("ls",function(){return !!window.localStorage;});'
+      + 'window.dshShell.dbg(o.join(" | "));}catch(e){'
+      + 'try{window.dshShell.dbg("probe err "+e);}catch(x){}}},1500);})()');    // ── 诊断注入（不受 INJECT_ENABLED 影响）──
     // 目的：查清"手机端点文件后为什么一个 stat 请求都不发"。
     // 依据（来自 DSH 客户端源码）：点文件 → openResource(fileAddressFor(session,root,path))
     //   → 侧栏开标签 → 资源解析器把 dsh-resource:// 地址解析成 workspaceFileScope+path
@@ -2864,6 +2883,7 @@ struct Index {
         .width('100%')
         .padding({ left: 8, right: 8, top: 6, bottom: 6 })
         .backgroundColor('#99000000')
+        .margin({ top: this.safeTop })
       }
 
       // 状态栏区域**不再单独画色条**（用户定稿）。
