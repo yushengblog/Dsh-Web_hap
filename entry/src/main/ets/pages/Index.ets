@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3632'
+const BUILD_TAG: string = '构建 v10-01-3642'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -71,12 +71,11 @@ interface ShellBridge {
   log: (m: string) => void;
   openSites: () => void;
   setOverlay: (v: number) => void;
-  setRailWidth: (w: number) => void;
   setDialog: (v: number) => void;
   getCurLabel: () => string;
   openSwitcher: () => void;
-  // 网页上报真实配色（status bar 双色块用）
-  setTheme: (rail: string, chat: string, border: string) => void;
+  // 网页上报当前是否深色（原生页面与状态栏条据此上色）
+  setDark: (v: number) => void;
 }
 
 function mkAddr(name: string, url: string): Address {
@@ -122,12 +121,8 @@ struct Index {
   private store: preferences.Preferences | null = null;
   private visited: boolean = false;
   private webOverlay: boolean = false;
-  @State railWidth: number = 280;
   // 状态栏双色：直接镜像网页里量到的真实颜色，这样深色/浅色主题都能自动跟随
   // （不再硬编码 #F9FAFC / #FFFFFF / #DBDCDE）
-  @State railColor: string = '#F9FAFB';
-  @State chatColor: string = '#FFFFFF';
-  @State dividerColor: string = '#DBDCDE';
   // App 自身原生页面是否用深色（由网页上报的配色亮度推导，随 DSH 主题自动切换）
   @State isDark: boolean = false;
   private sysBarDark: boolean = false;
@@ -154,7 +149,7 @@ struct Index {
   @State davUrl: string = '';
   @State davUser: string = '';
   @State davPass: string = '';
-  @State davAuto: boolean = true;
+  @State davAuto: boolean = false;
   @State davBusy: boolean = false;
   @State davMsg: string = '';
   @State davLast: string = '';
@@ -180,9 +175,11 @@ struct Index {
         // 之前进过站点：直接回到那个站点。
         // 若它挂了就一直停在转圈页，底部「站点」随时可切换，不会卡死。
         this.connect(this.curG, this.curI);
-      } else {
-        this.startProbeAll();
       }
+      // 未进过站点时**不再自动探测**（用户定稿）：
+      //   不点的地址没必要探；真正要保的只是"点了之后白屏能退回来"，
+      //   那由 connect() 之后的 watchWhiteScreen() 负责。
+      //   想看全部红绿灯时，用户在站点页手动点「重新检测」。
     }, 300);
 
 
@@ -261,28 +258,10 @@ struct Index {
     return this.isDark ? dark : light;
   }
 
-  // 系统状态栏图标颜色跟随状态栏底色（底色深 → 图标用白色），否则深色模式下看不见时间/电量
-  applySysBarIcons(railHex: string): void {
+  // 系统状态栏图标颜色跟随明暗（深色 → 图标用白色），否则深色模式下看不见时间/电量。
+  // 明暗由网页上报（setDark），不再自己算颜色。
+  applySysBarIcons(dark: boolean): void {
     try {
-      const r = parseInt(railHex.substring(1, 3), 16);
-      const g = parseInt(railHex.substring(3, 5), 16);
-      const b = parseInt(railHex.substring(5, 7), 16);
-      if (isNaN(r) || isNaN(g) || isNaN(b)) {
-        return;
-      }
-      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-      const dark = lum < 0.5;
-      // App 原生页面同步切深色
-      if (dark !== this.isDark) {
-        this.isDark = dark;
-        try {
-          if (this.store !== null) {
-            this.store.putSync(KEY_DARK, dark ? '1' : '0');
-            this.store.flush();
-          }
-        } catch (e) {
-        }
-      }
       if (this.sysBarApplied && dark === this.sysBarDark) {
         return;
       }
@@ -353,6 +332,7 @@ struct Index {
   }
 
   // ── 后台检测：隐藏 Web 依次真加载每条地址 ───────────────────────
+  // 只在用户**手动点「重新检测」**时启动（不再开机自动跑）。
   startProbeAll(): void {
     const q: string[] = [];
     for (let gi = 0; gi < this.groups.length; gi++) {
@@ -367,6 +347,23 @@ struct Index {
     this.probePos = 0;
     this.probing = q.length > 0;
     this.nextProbe();
+  }
+
+  // 取消全部探测：清队列 + 停超时 + 让隐藏 Web 卸载当前页面（停止加载/省流量/省内存）
+  // 用户要求：一旦退出站点页面就自动取消全部探测。
+  cancelProbe(): void {
+    if (this.probeTimer >= 0) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = -1;
+    }
+    this.probeQueue = [];
+    this.probePos = 0;
+    this.probing = false;
+    this.probeHint = '';
+    try {
+      this.probeController.loadUrl(EMPTY_URL);
+    } catch (e) {
+    }
   }
 
   nextProbe(): void {
@@ -487,6 +484,8 @@ struct Index {
     if (!items || i < 0 || i >= items.length || items[i].off) {
       return;
     }
+    // 离开站点页去连站点：取消还在跑的探测
+    this.cancelProbe();
     this.curG = g;
     this.curI = i;
     this.saveStore();
@@ -550,6 +549,8 @@ struct Index {
 
   // 从站点页回到网页（站点页的「返回」按钮 + 系统侧滑/返回键都会走这里）
   backToWeb(): void {
+    // 离开站点页：取消还在跑的探测
+    this.cancelProbe();
     if (this.visited) {
       this.phase = PHASE_WEB;
               this.watchWhiteScreen();
@@ -563,6 +564,22 @@ struct Index {
     const s = this.curLabel();
     if (s !== this.curLabelText) {
       this.curLabelText = s;
+    }
+    this.pushCurLabel();
+  }
+
+  // 把「当前连接情况」文字**主动推送**到网页左侧栏那一行。
+  // 用户定稿：不切站点就不该反复轮询原生 —— 所以改成"变了才推"。
+  pushCurLabel(): void {
+    if (this.phase !== PHASE_WEB) {
+      return;
+    }
+    try {
+      const js = '(function(){try{var e=document.getElementById("dsh-curlbl");'
+        + 'if(e&&e.textContent!==' + JSON.stringify(this.curLabelText) + '){'
+        + 'e.textContent=' + JSON.stringify(this.curLabelText) + ';}}catch(x){}})()';
+      this.js(js);
+    } catch (e) {
     }
   }
 
@@ -762,7 +779,7 @@ struct Index {
       this.davUser = this.store.getSync(KEY_DAV_USER, '') as string;
       this.davPass = this.store.getSync(KEY_DAV_PASS, '') as string;
       this.davLast = this.store.getSync(KEY_DAV_LAST, '') as string;
-      const da = this.store.getSync(KEY_DAV_AUTO, '1') as string;
+      const da = this.store.getSync(KEY_DAV_AUTO, '0') as string;
       this.davAuto = (da !== '0');
       this.davReady = true;
       // 冷启动先按上次记录的明暗上色，网页上报后会再校正
@@ -1341,27 +1358,41 @@ struct Index {
       + 'var t=(bs[j].getAttribute("aria-label")||bs[j].innerText||"");'
       + 'if(t.indexOf("关闭")>=0||t.indexOf("Close")>=0){bs[j].click();return;}}}'
       + 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",code:"Escape",keyCode:27,which:27,bubbles:true}));}catch(e){}};'
-      // ── 统一轮询（800ms 一次，替代原来 3 个独立的 setInterval）──
-      // · 侧栏元素做缓存，避免每次都做全 DOM 属性查询
-      // · 三个上报值都做**变化检测**，只有真变了才跨 JS↔原生桥（桥调用本身有开销）
-      + 'var railEl=null,lastTheme="",lastOv=-1,lastDlg=-1;'
+      // ── 统一轮询（1000ms 一次）──────────────────────────────────
+      // 只做三件事：
+      //   ① 从侧栏底色亮度判断"是不是深色"，变化时才上报（原生据此给页面和状态栏条上色）
+      //   ② 右侧栏是否全屏展开（返回键要先收它）——变化时才报
+      //   ③ 是否有弹窗（返回键要先关它）——变化时才报
+      // 不再上报配色细节和侧栏宽度：状态栏已改成一条纯色条，不需要对齐。
+      + 'var railEl=null,lastDark=-1,lastOv=-1,lastDlg=-1;'
       + 'function tick(){try{'
       + 'if(!railEl||!document.contains(railEl)){railEl=document.querySelector("[class*=sidebarCol]");}'
-      + 'if(railEl){'
-      + 'var w=Math.round(railEl.getBoundingClientRect().width);if(w>40)window.dshShell.setRailWidth(w);'
-      + 'var rb=rgbp(effBg(railEl));'
-      + 'var cc=document.querySelector("[class*=centerCol]");'
-      + 'var cb=cc?rgbp(effBg(cc)):null;if(!cb){cb=rgbp(effBg(document.body));}'
-      + 'var dv=blend(rgbp(getComputedStyle(railEl).borderRightColor),rb);'
-      + 'var rs=hx(rb),cs=hx(cb);'
-      + 'if(rs&&cs){var key=rs+cs+(dv?dv:rs);if(key!==lastTheme){lastTheme=key;window.dshShell.setTheme(rs,cs,dv?dv:rs);}}}'
+      + 'if(railEl){var bg=rgbp(effBg(railEl));'
+      + 'if(bg){var lum=(0.299*bg.r+0.587*bg.g+0.114*bg.b)/255;var dk=lum<0.5?1:0;'
+      + 'if(dk!==lastDark){lastDark=dk;window.dshShell.setDark(dk);}}}'
       + 'var ov=window.__dshRightOpen()?1:0;if(ov!==lastOv){lastOv=ov;window.dshShell.setOverlay(ov);}'
       + 'var dg=window.__dshDialogOpen()?1:0;if(dg!==lastDlg){lastDlg=dg;window.dshShell.setDialog(dg);}'
       + '}catch(e){}}'
-      + 'setTimeout(tick,300);setInterval(tick,800);'
+      + 'setTimeout(tick,300);setInterval(tick,1000);'
       + '})()');
-    //    这样它属于网页 DOM，设置弹窗天然盖在它上面；收起导航栏时 DSH 也会让它一起收。
-    this.js('(function(){if(window.__dshCur){return;}window.__dshCur=1;setInterval(function(){try{if(!document.getElementById("dsh-curlbl")){var row=document.querySelector("[class*=logoRow]");if(!row||!row.parentElement){return;}var d=document.createElement("div");d.id="dsh-curlbl";d.style.cssText="font-size:11px;color:#8a8a8a;padding:2px 14px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;";d.onclick=function(){try{window.dshShell.openSwitcher();}catch(e){}};row.parentElement.insertBefore(d,row.nextSibling);}var e=document.getElementById("dsh-curlbl");if(e){var t=window.dshShell.getCurLabel();if(t&&t!==e.textContent){e.textContent=t;}}}catch(x){}},1200);})()');
+    // ⑥ 「当前连接情况」行：插进网页左侧栏，点它弹出站点切换面板。
+    //    文字**不再轮询拉取**（用户要求：不切站点就没必要反复问原生）；
+    //    改为：这里只负责"确保元素存在 + 首次填字"，之后由原生在切换站点时主动推送
+    //    （见 pushCurLabel()）。
+    this.js('(function(){if(window.__dshCur){return;}window.__dshCur=1;'
+      + 'function ensure(){try{'
+      + 'if(!document.getElementById("dsh-curlbl")){'
+      + 'var row=document.querySelector("[class*=logoRow]");'
+      + 'if(!row||!row.parentElement)return false;'
+      + 'var d=document.createElement("div");d.id="dsh-curlbl";'
+      + 'd.style.cssText="font-size:11px;color:#8a8a8a;padding:2px 14px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;";'
+      + 'd.onclick=function(){try{window.dshShell.openSwitcher();}catch(e){}};'
+      + 'row.parentElement.insertBefore(d,row.nextSibling);'
+      + 'd.textContent=window.dshShell.getCurLabel()||"";'
+      + 'return true;}'
+      + 'return false;}catch(e){return false;}}'
+      + 'var n=0;var t=setInterval(function(){n++;if(ensure()||n>40){clearInterval(t);}},700);'
+      + '})()');
   }
 
   buildBridge(): ShellBridge {
@@ -1400,22 +1431,21 @@ struct Index {
       setOverlay: (v: number): void => {
         this.webOverlay = (v === 1);
       },
-      setRailWidth: (w: number): void => {
-        if (w > 40 && w < 900 && Math.abs(w - this.railWidth) > 1) {
-          this.railWidth = w;
+      // 网页只上报"当前是不是深色"（由侧栏底色亮度算出）。
+      // 不再上报具体配色，也不再上报侧栏宽度 —— 状态栏已改成一条纯色条。
+      setDark: (v: number): void => {
+        const dark = (v === 1);
+        if (dark === this.isDark) {
+          return;
         }
-      },
-      // 网页把量到的真实配色报上来（#RRGGBB）。深色/浅色主题都能自动跟随。
-      setTheme: (rail: string, chat: string, border: string): void => {
-        if (rail.length === 7 && rail.charAt(0) === '#' && rail !== this.railColor) {
-          this.railColor = rail;
-          this.applySysBarIcons(rail);
-        }
-        if (chat.length === 7 && chat.charAt(0) === '#' && chat !== this.chatColor) {
-          this.chatColor = chat;
-        }
-        if (border.length === 7 && border.charAt(0) === '#' && border !== this.dividerColor) {
-          this.dividerColor = border;
+        this.isDark = dark;
+        this.applySysBarIcons(dark);
+        try {
+          if (this.store !== null) {
+            this.store.putSync(KEY_DARK, dark ? '1' : '0');
+            this.store.flush();
+          }
+        } catch (e) {
         }
       },
       setDialog: (v: number): void => {
@@ -2576,7 +2606,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setRailWidth', 'setDialog', 'getCurLabel', 'openSwitcher', 'setTheme'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
@@ -2725,25 +2755,15 @@ struct Index {
           }
         })
 
-      // 状态栏区域背景：左块=左侧栏色，右块=对话区色（与网页两块一一对应）
-      // 颜色由注入脚本实时量取并上报（setTheme），因此深色模式会自动跟随。
+      // 状态栏区域：一条**纯色条**（用户定稿）。
+      // 之前是"左块=网页侧栏色 + 1px 分界线 + 右块=对话区色"的拼色方案，
+      // 需要网页上报侧栏宽度和两侧配色，开销大且容易错位；现在直接取消，
+      // 只按明暗给一条底色（浅色 #FFFFFF / 深色 #1B1B1C），随 DSH 主题自动切换。
       // 必须放在 Web 之后：ArkUI 靠声明顺序层叠，放前面会被 Web 盖住
-      Row() {
-        Row()
-          .width(this.railWidth)
-          .height('100%')
-          .backgroundColor(this.railColor)
-        Row()
-          .width(1)
-          .height('100%')
-          .backgroundColor(this.dividerColor)
-        Row()
-          .layoutWeight(1)
-          .height('100%')
-          .backgroundColor(this.chatColor)
-      }
-      .width('100%')
-      .height(this.safeTop)
+      Row()
+        .width('100%')
+        .height(this.safeTop)
+        .backgroundColor(this.tc('#FFFFFF', '#1B1B1C'))
 
       // 站点快速切换面板（点左侧栏那行"当前连接情况"时弹出）
       if (this.showSwitcher) {
