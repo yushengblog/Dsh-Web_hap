@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -1380,9 +1380,17 @@ struct Index {
       + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:"+mono+";font-size:12.5px;line-height:1.65;";'
       + 'pre.textContent=(v&&typeof v.text==="string")?v.text:"（读取失败）";'
       + 'var wrapped=true;'
-      + 'var wrapBtn=mkbtn("自动换行",function(){wrapped=!wrapped;'
+      // 换行状态必须"一眼看得出来"（用户反馈：之前只有颜色深浅，看不出开还是关）。
+      // 仿原版 DSH：开启时写「自动换行」并高亮，关闭时写「取消换行」且不高亮。
+      + 'function syncWrap(){'
+      + 'wrapBtn.textContent=wrapped?"自动换行":"取消换行";'
+      + 'wrapBtn.style.background=wrapped?(dk?"#182740":"#eaf1ff"):bt;'
+      + 'wrapBtn.style.borderColor=wrapped?(dk?"#2b4a7a":"#b9cdf0"):bd;'
+      + 'wrapBtn.style.color=wrapped?(dk?"#8fb6ff":"#1a4fb4"):sub;}'
+      + 'var wrapBtn=mkbtn("",function(){wrapped=!wrapped;'
       + 'pre.style.whiteSpace=wrapped?"pre-wrap":"pre";pre.style.wordBreak=wrapped?"break-word":"normal";'
-      + 'pre.style.overflowX=wrapped?"hidden":"auto";wrapBtn.style.color=wrapped?fg:sub;});'
+      + 'pre.style.overflowX=wrapped?"hidden":"auto";syncWrap();});'
+      + 'syncWrap();'
       + 'var reBtn=mkbtn("重新读取",function(){pre.textContent="读取中…";'
       + 'rd(path,1,function(v2){if(!v2){pre.textContent="（读取失败）";return;}'
       + 'pre.textContent=typeof v2.text==="string"?v2.text:"（读取失败）";'
@@ -1401,8 +1409,11 @@ struct Index {
       + 'var sx=null,sy=null;'
       + 'w.addEventListener("touchstart",function(e){var t=e.touches[0];sx=t.clientX;sy=t.clientY;},{passive:true});'
       + 'w.addEventListener("touchend",function(e){if(sx===null)return;var t=e.changedTouches[0];'
-      + 'var dx=t.clientX-sx,dy=t.clientY-sy;sx=null;'
-      + 'if(dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
+      + 'var dx=t.clientX-sx,dy=t.clientY-sy;'
+      // 只在**从左边缘（<56px）起滑**时关闭（用户反馈：在正文里右滑会误触发关闭）。
+      // 这样正文区域的横向滑动不会关掉查看器；左边缘的返回手势仍由系统 back 走 onBackPress 关闭。
+      + 'var fromEdge=(sx<56);sx=null;'
+      + 'if(fromEdge&&dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
       + 'document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
       + 'function show(path){var go=function(v){render(v,path);closeDshTab(base(path));};'
