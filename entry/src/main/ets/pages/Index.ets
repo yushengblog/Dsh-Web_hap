@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -8,6 +8,7 @@ import { inputMethod } from '@kit.IMEKit';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { http } from '@kit.NetworkKit';
+import { rcp } from '@kit.RemoteCommunicationKit';
 
 const DOMAIN: number = 0x0000;
 
@@ -17,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3572'
+const BUILD_TAG: string = '构建 v10-01-3592'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -144,6 +145,14 @@ struct Index {
   @State davBusy: boolean = false;
   @State davMsg: string = '';
   @State davLast: string = '';
+  // 连接自检
+  @State davTesting: boolean = false;
+  @State davTestLog: string = '';
+  @State davTestOk: boolean = false;
+  // 传输进度
+  @State davProgress: number = 0;        // 0-100
+  @State davProgressText: string = '';   // 例如「上传 12.3 / 45.6 KB」
+  @State davPhase: string = '';          // 正在做什么（建目录 / 上传 / 下载）
   private davTimer: number = -1;
   private davReady: boolean = false;   // 配置读完之前不触发自动备份
 
@@ -743,7 +752,8 @@ struct Index {
   // 发一个 WebDAV 请求。MKCOL 不在 RequestMethod 枚举里，只能断言透传
   //（GET/PUT/POST/DELETE/HEAD/OPTIONS 走枚举，别的走断言）。
   private davSend(method: string, path: string, body: string,
-                  onDone: (code: number, text: string) => void): void {
+                  onDone: (code: number, text: string) => void,
+                  report?: boolean): void {
     const url: string = this.davBase() + path;
     const req = http.createHttp();
     const header: Record<string, string> = {};
@@ -751,6 +761,29 @@ struct Index {
     const auth: string = this.davAuthHeader();
     if (auth.length > 0) {
       header['Authorization'] = auth;
+    }
+    // 传输进度上报（只有备份/恢复这类大请求才需要）
+    if (report === true) {
+      req.on('dataSendProgress', (info: http.DataSendProgressInfo) => {
+        try {
+          const total: number = info.totalSize;
+          if (total > 0) {
+            this.davProgress = Math.floor(info.sendSize * 100 / total);
+            this.davProgressText = '已发送 ' + this.davKb(info.sendSize) + ' / ' + this.davKb(total);
+          }
+        } catch (e) {
+        }
+      });
+      req.on('dataReceiveProgress', (info: http.DataReceiveProgressInfo) => {
+        try {
+          const total: number = info.totalSize;
+          if (total > 0) {
+            this.davProgress = Math.floor(info.receiveSize * 100 / total);
+            this.davProgressText = '已接收 ' + this.davKb(info.receiveSize) + ' / ' + this.davKb(total);
+          }
+        } catch (e) {
+        }
+      });
     }
     let m: http.RequestMethod = http.RequestMethod.GET;
     if (method === 'PUT') {
@@ -786,21 +819,162 @@ struct Index {
     });
   }
 
+  // MKCOL 不在 http.RequestMethod 的封闭枚举里（枚举只有 OPTIONS/GET/HEAD/POST/PUT/DELETE/TRACE/CONNECT），
+  // 用 http 发 MKCOL 会被原生层拒绝，返回 "HTTP -1 Parameter error"（实测踩到）。
+  // 改用 rcp（Remote Communication Kit）：它的 HttpMethod 类型显式允许任意方法名
+  //   export type HttpMethod = 'GET' | ... | (string & NonNullable<unknown>);
+  // 只把 MKCOL 交给 rcp，PUT/GET/DELETE 仍走 http —— 因为 http 的传输进度事件更好用。
+  private davMkcol(path: string, onDone: (code: number, msg: string) => void): void {
+    const url: string = this.davBase() + path;
+    try {
+      const headers: rcp.RequestHeaders = {};
+      const auth: string = this.davAuthHeader();
+      if (auth.length > 0) {
+        headers['Authorization'] = auth;
+      }
+      const session = rcp.createSession();
+      const req = new rcp.Request(url, 'MKCOL', headers);
+      session.fetch(req).then((resp: rcp.Response) => {
+        onDone(resp.statusCode, '');
+        try {
+          session.close();
+        } catch (e) {
+        }
+      }).catch((e: BusinessError) => {
+        const m: string = e && e.message ? e.message : 'rcp error';
+        onDone(-1, m);
+        try {
+          session.close();
+        } catch (e2) {
+        }
+      });
+    } catch (e) {
+      onDone(-1, 'rcp 不可用');
+    }
+  }
+
   // 依次创建 /DSH 和 /DSH/Dsh_zhandian。已存在时服务器返回 405（或 301/302），都算成功。
-  private davEnsureDir(onDone: (ok: boolean, msg: string) => void): void {
-    this.davSend('MKCOL', '/DSH', '', (c1: number, t1: string) => {
-      const ok1: boolean = (c1 >= 200 && c1 < 300) || c1 === 405 || c1 === 301 || c1 === 302;
-      if (!ok1) {
-        onDone(false, '创建 /DSH 失败：HTTP ' + c1.toString() + (t1.length > 0 ? (' ' + t1) : ''));
+  // 注意：MKCOL 失败**不再直接判定失败** —— 目录可能早就存在，交给后续 PUT 定论，
+  //       这样即使某些服务端禁用了 MKCOL，只要目录存在就仍能备份。
+  private davEnsureDir(onDone: (ok: boolean, note: string) => void): void {
+    this.davMkcol('/DSH', (c1: number, _t1: string) => {
+      this.davMkcol(DAV_DIR, (c2: number, _t2: string) => {
+        const ok1: boolean = (c1 >= 200 && c1 < 300) || c1 === 405 || c1 === 301 || c1 === 302;
+        const ok2: boolean = (c2 >= 200 && c2 < 300) || c2 === 405 || c2 === 301 || c2 === 302;
+        if (ok1 && ok2) {
+          onDone(true, '目录已存在或创建成功');
+        } else {
+          onDone(true, 'MKCOL: /DSH=' + c1.toString() + '，' + DAV_DIR + '=' + c2.toString()
+            + '（已跳过建目录，直接尝试写入）');
+        }
+      });
+    });
+  }
+
+  davKb(n: number): string {
+    if (n < 1024) {
+      return n.toString() + ' B';
+    }
+    const kb: number = n / 1024;
+    if (kb < 1024) {
+      return (Math.round(kb * 10) / 10).toString() + ' KB';
+    }
+    return (Math.round(kb / 1024 * 100) / 100).toString() + ' MB';
+  }
+
+  // 连接自检：一步步验证"地址能不能通 / 认证对不对 / 能不能建目录 / 能不能写文件"
+  // 每步都往 davTestLog 追加一行，失败时能直接看出卡在哪。
+  davTest(): void {
+    if (this.davBase().length < 8) {
+      this.davTestLog = '请先填写 WebDAV 地址（要包含 http:// 或 https://）';
+      this.davTestOk = false;
+      return;
+    }
+    if (this.davTesting) {
+      return;
+    }
+    this.davTesting = true;
+    this.davTestOk = false;
+    this.davTestLog = '';
+    this.davPhase = '';
+    this.davProgress = 0;
+    this.davProgressText = '';
+    const base: string = this.davBase();
+    const probe: string = DAV_DIR + '/.dsh-probe.json';
+
+    this.davTestLog = '① 地址：' + base + '\n';
+
+    // ① OPTIONS 根目录：验证可达 + 认证 + 是否启用 WebDAV
+    this.davSend('OPTIONS', '/', '', (c1: number, _t1: string) => {
+      if (c1 === -1) {
+        this.davTestLog = this.davTestLog + '   ❌ 连不上（网络不通 / 地址写错 / 端口不对）\n';
+        this.davTesting = false;
         return;
       }
-      this.davSend('MKCOL', DAV_DIR, '', (c2: number, t2: string) => {
-        const ok2: boolean = (c2 >= 200 && c2 < 300) || c2 === 405 || c2 === 301 || c2 === 302;
-        if (!ok2) {
-          onDone(false, '创建 ' + DAV_DIR + ' 失败：HTTP ' + c2.toString() + (t2.length > 0 ? (' ' + t2) : ''));
+      if (c1 === 401 || c1 === 403) {
+        this.davTestLog = this.davTestLog + '   ❌ HTTP ' + c1.toString()
+          + '：认证未通过（检查用户名/密码；若服务端只允许 NTLM/Digest，本 App 不支持）\n';
+        this.davTesting = false;
+        return;
+      }
+      if (c1 < 200 || c1 >= 400) {
+        this.davTestLog = this.davTestLog + '   ❌ HTTP ' + c1.toString() + '（服务端拒绝）\n';
+        this.davTesting = false;
+        return;
+      }
+      this.davTestLog = this.davTestLog + '   ✅ HTTP ' + c1.toString() + '：可达且认证通过\n';
+
+      // ② 建目录
+      this.davTestLog = this.davTestLog + '② 创建目录 ' + DAV_DIR + '\n';
+      this.davEnsureDir((ok: boolean, em: string) => {
+        if (!ok) {
+          this.davTestLog = this.davTestLog + '   ❌ ' + em + '\n';
+          this.davTesting = false;
           return;
         }
-        onDone(true, '');
+        if (em.indexOf('MKCOL:') === 0) {
+          this.davTestLog = this.davTestLog + '   ⚠ ' + em + '\n';
+        } else {
+          this.davTestLog = this.davTestLog + '   ✅ ' + em + '\n';
+        }
+
+        // ③ 写入探测文件
+        this.davTestLog = this.davTestLog + '③ 写入测试文件（验证可写）\n';
+        const body: string = '{"probe":"dsh","at":"' + new Date().toISOString() + '"}';
+        this.davSend('PUT', probe, body, (c3: number, _t3: string) => {
+          if (c3 < 200 || c3 >= 300) {
+            this.davTestLog = this.davTestLog + '   ❌ HTTP ' + c3.toString()
+              + '：不能写入（检查 IIS 的 WebDAV 创作规则是否允许写入、目录 NTFS 权限）\n';
+            this.davTesting = false;
+            return;
+          }
+          this.davTestLog = this.davTestLog + '   ✅ 写入成功\n';
+
+          // ④ 读回
+          this.davTestLog = this.davTestLog + '④ 读回测试文件\n';
+          this.davSend('GET', probe, '', (c4: number, t4: string) => {
+            if (c4 < 200 || c4 >= 300) {
+              this.davTestLog = this.davTestLog + '   ❌ HTTP ' + c4.toString() + '：不能读取\n';
+            } else if (t4.indexOf('dsh') < 0) {
+              this.davTestLog = this.davTestLog + '   ⚠ 读取成功但内容不符（可能有缓存/代理）\n';
+            } else {
+              this.davTestLog = this.davTestLog + '   ✅ 读取成功，内容一致\n';
+            }
+            // ⑤ 清理
+            this.davSend('DELETE', probe, '', (c5: number, _t5: string) => {
+              if (c5 >= 200 && c5 < 300) {
+                this.davTestLog = this.davTestLog + '⑤ 清理测试文件：✅ 已删除\n';
+              } else {
+                this.davTestLog = this.davTestLog + '⑤ 清理测试文件：⚠ HTTP ' + c5.toString()
+                  + '（可手动删除 ' + probe + '）\n';
+              }
+              this.davTestOk = true;
+              this.davTestLog = this.davTestLog + '\n✅ 全部通过，可以正常备份 / 恢复';
+              this.davTesting = false;
+              promptAction.showToast({ message: 'WebDAV 连接正常', duration: 2000 });
+            });
+          });
+        });
       });
     });
   }
@@ -859,35 +1033,48 @@ struct Index {
     }
     this.davBusy = true;
     this.davMsg = '正在备份…';
+    this.davProgress = 0;
+    this.davProgressText = '';
+    this.davPhase = '建目录';
     const payload: string = this.buildBackupJson();
     const stamp: string = this.davStamp();
-    this.davEnsureDir((ok: boolean, em: string) => {
+    this.davEnsureDir((ok: boolean, note: string) => {
       if (!ok) {
         this.davBusy = false;
-        this.davMsg = em;
+        this.davPhase = '';
+        this.davMsg = note;
         return;
       }
+      const mkNote: string = note;
+      this.davPhase = '上传主文件';
       this.davSend('PUT', DAV_DIR + DAV_FILE, payload, (c1: number, _t1: string) => {
         if (c1 < 200 || c1 >= 300) {
           this.davBusy = false;
+          this.davPhase = '';
           this.davMsg = '上传失败：HTTP ' + c1.toString()
-            + '（检查 WebDAV 是否允许 PUT/MKCOL、目录是否可写、账号密码是否正确）';
+            + '（检查 WebDAV 是否允许 PUT、目录是否存在且可写、账号密码是否正确）'
+            + (mkNote.indexOf('MKCOL:') === 0 ? ('｜' + mkNote) : '');
           return;
         }
+        this.davPhase = '上传历史副本';
+        this.davProgress = 0;
+        this.davProgressText = '';
         this.davSend('PUT', DAV_DIR + '/dsh-sites-' + stamp + '.json', payload, (c2: number, _t2: string) => {
           this.davBusy = false;
+          this.davPhase = '';
+          this.davProgress = 100;
           this.davLast = stamp;
           this.saveDavCfg();
           if (c2 >= 200 && c2 < 300) {
-            this.davMsg = '备份成功 · ' + stamp;
+            this.davMsg = '备份成功 · ' + stamp + '（' + this.davKb(payload.length) + '）';
           } else {
             this.davMsg = '主文件已备份，历史副本失败：HTTP ' + c2.toString();
           }
           if (manual) {
             promptAction.showToast({ message: this.davMsg, duration: 2500 });
           }
-        });
-      });
+        }, true);
+      }, true);
     });
   }
 
@@ -901,8 +1088,12 @@ struct Index {
     }
     this.davBusy = true;
     this.davMsg = '正在读取备份…';
+    this.davProgress = 0;
+    this.davProgressText = '';
+    this.davPhase = '下载备份文件';
     this.davSend('GET', DAV_DIR + DAV_FILE, '', (code: number, text: string) => {
       this.davBusy = false;
+      this.davPhase = '';
       if (code === 404) {
         this.davMsg = '服务器上没有找到备份文件（先做一次备份）';
         return;
@@ -953,7 +1144,7 @@ struct Index {
       } catch (e) {
         this.davMsg = '备份内容不是合法 JSON';
       }
-    });
+    }, true);
   }
 
   saveStore(): void {
@@ -2016,6 +2207,21 @@ struct Index {
 
           // 操作卡片
           Column({ space: 10 }) {
+            // 第 1 行：测试连接
+            Button(this.davTesting ? '测试中…' : '测试连接')
+              .fontSize(14)
+              .height(42)
+              .width('100%')
+              .backgroundColor('#FFFFFF')
+              .fontColor('#0A59F7')
+              .border({ width: 1, color: '#0A59F7' })
+              .enabled(!this.davBusy && !this.davTesting)
+              .onClick(() => {
+                this.saveDavCfg();
+                this.davTest();
+              })
+
+            // 第 2 行：备份 / 恢复
             Row({ space: 10 }) {
               Button(this.davBusy ? '处理中…' : '立即备份')
                 .fontSize(14)
@@ -2023,7 +2229,7 @@ struct Index {
                 .layoutWeight(1)
                 .backgroundColor('#0A59F7')
                 .fontColor('#FFFFFF')
-                .enabled(!this.davBusy)
+                .enabled(!this.davBusy && !this.davTesting)
                 .onClick(() => {
                   this.saveDavCfg();
                   this.davBackup(true);
@@ -2035,13 +2241,45 @@ struct Index {
                 .backgroundColor('#FFFFFF')
                 .fontColor('#0A59F7')
                 .border({ width: 1, color: '#0A59F7' })
-                .enabled(!this.davBusy)
+                .enabled(!this.davBusy && !this.davTesting)
                 .onClick(() => {
                   this.saveDavCfg();
                   this.davRestore();
                 })
             }
             .width('100%')
+
+            // 传输进度（有传输时才出现）
+            if (this.davPhase.length > 0) {
+              Column({ space: 6 }) {
+                Row({ space: 8 }) {
+                  Text(this.davPhase + '…')
+                    .fontSize(12)
+                    .fontColor('#0A59F7')
+                    .layoutWeight(1)
+                  Text(this.davProgress.toString() + '%')
+                    .fontSize(12)
+                    .fontColor('#0A59F7')
+                }
+                .width('100%')
+
+                Progress({ value: this.davProgress, total: 100, type: ProgressType.Linear })
+                  .width('100%')
+                  .height(6)
+                  .color('#0A59F7')
+
+                if (this.davProgressText.length > 0) {
+                  Text(this.davProgressText)
+                    .fontSize(11)
+                    .fontColor('#8A94A6')
+                    .width('100%')
+                }
+              }
+              .width('100%')
+              .padding(10)
+              .borderRadius(10)
+              .backgroundColor('#F0F5FF')
+            }
 
             Text(this.davMsg.length > 0 ? this.davMsg : '备份目录会在首次备份时自动创建')
               .fontSize(12)
@@ -2061,6 +2299,41 @@ struct Index {
           .backgroundColor(Color.White)
           .border({ width: 1, color: '#D3DAE4' })
           .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+
+          // 自检日志（测试连接后出现）
+          if (this.davTestLog.length > 0) {
+            Column({ space: 6 }) {
+              Row({ space: 6 }) {
+                Text(this.davTesting ? '正在自检…' : (this.davTestOk ? '自检结果：通过' : '自检结果：未通过'))
+                  .fontSize(13)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.davTesting ? '#0A59F7' : (this.davTestOk ? '#22BB55' : '#CC3333'))
+                  .layoutWeight(1)
+                if (!this.davTesting && this.davTestLog.length > 0) {
+                  Text('清除')
+                    .fontSize(12)
+                    .fontColor('#8A94A6')
+                    .onClick(() => {
+                      this.davTestLog = '';
+                      this.davTestOk = false;
+                    })
+                }
+              }
+              .width('100%')
+
+              Text(this.davTestLog)
+                .fontSize(11)
+                .fontColor('#4A5568')
+                .width('100%')
+                .lineHeight(18)
+            }
+            .width('100%')
+            .padding(12)
+            .borderRadius(14)
+            .backgroundColor(Color.White)
+            .border({ width: 1, color: '#D3DAE4' })
+            .shadow({ radius: 14, color: '#26000000', offsetX: 0, offsetY: 3 })
+          }
 
           // 说明卡片
           Column({ space: 6 }) {
