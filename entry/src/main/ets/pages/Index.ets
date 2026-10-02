@@ -1,6 +1,6 @@
 ﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
-import { common } from '@kit.AbilityKit';
+import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3672'
+const BUILD_TAG: string = '构建 v10-01-3682'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -153,6 +153,8 @@ struct Index {
   // ── 诊断用（排查"手机端文件查看器打不开"）──
   // webConsoleErr：网页控制台里的报错，直接显示在界面上，便于真机取证（不用连电脑）
   @State webConsoleErr: string = '';
+  // 从安装包读出的版本号（形如 v1.0.12 (1000012)）——用于让用户核对装的是哪一版
+  @State verText: string = BUILD_TAG;
   // 网页增强总开关：置 false 可完全停掉所有注入，用来判断"是不是我的注入引起的"
   private injectEnabled: boolean = INJECT_ENABLED;
 
@@ -176,6 +178,7 @@ struct Index {
   private davReady: boolean = false;   // 配置读完之前不触发自动备份
 
   aboutToAppear(): void {
+    this.readVersion();
     this.loadStore();
     this.measureSafeArea();
     this.loadInjectJs();
@@ -261,6 +264,19 @@ struct Index {
       this.injectJs = '';
     }
     this.injectLen = this.injectJs.length;
+  }
+
+  // 从安装包自身读版本号，保证"界面显示的版本" == "实际安装的版本"。
+  // （以前显示的是构建时间戳，用户没法核对装的是哪一版 —— 用户反馈后改掉）
+  readVersion(): void {
+    try {
+      const info = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      if (info && info.versionName) {
+        this.verText = 'v' + info.versionName + ' (' + info.versionCode.toString() + ')';
+      }
+    } catch (e) {
+      this.verText = BUILD_TAG;
+    }
   }
 
   // 主题取色：浅色 / 深色两套。所有原生页面颜色都走这里，
@@ -1788,7 +1804,7 @@ struct Index {
           Text('站点')
             .fontSize(22)
             .fontWeight(FontWeight.Bold)
-          Text(BUILD_TAG)
+          Text(this.verText)
             .fontSize(10)
             .fontColor(this.tc('#BBBBBB', '#6E6E76'))
         }
@@ -2322,7 +2338,7 @@ struct Index {
       Image($r('app.media.startIcon')).width(96).height(96)
       LoadingProgress().width(42).height(42).color('#0A59F7').margin({ top: 20 })
       Text(this.hint).fontSize(14).fontColor(this.tc('#888888', '#9C9CA4')).margin({ top: 14 })
-      Text(BUILD_TAG).fontSize(10).fontColor(this.tc('#CCCCCC', '#6E6E76')).margin({ top: 6 })
+      Text(this.verText).fontSize(10).fontColor(this.tc('#CCCCCC', '#6E6E76')).margin({ top: 6 })
       Blank().layoutWeight(2)
       Button('站点')
         .fontSize(15)

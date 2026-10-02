@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.example.dshshell",
     "vendor": "example",
-    "versionCode": 1000011,
-    "versionName": "1.0.11",
+    "versionCode": 1000013,
+    "versionName": "1.0.12-diag",
     "buildVersion": "1",
     "icon": "$media:layered_image",
     "label": "$string:app_name"
