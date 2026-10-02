@@ -1306,25 +1306,29 @@ struct Index {
 
   // ── 自建文件查看器 ───────────────────────────────────────────────
   // 背景：手机端 DSH 的文件查看器对 dsh-resource://file/… 一律显示
-  //   "文件资源服务不可用"（DSH 客户端的 file 资源提供方在本 App 的 ArkWeb 里没注册），
-  //   而 dsh-resource://changes-review/… 正常 —— 只有 file 这一类提供方缺失。
+  //   "文件资源服务不可用"（DSH 客户端的 file 资源提供方在本 App 的 ArkWeb 里没注册）。
   // 方案：不依赖那个提供方，改用**同源 fetch** 直调 /api/workspaceFiles/read 取内容自行渲染。
   //
-  // ★触发方式（v1.1.1 修正）：**由"错误状态本身"触发，不再只认文件树的点击**。
-  //   原因：聊天上下文里的文件提及、变更审查里的「打开文件」等入口，点了同样会走 file 地址、
-  //   同样报错，但它们没有 [data-files-entry] 属性 —— 旧实现只监听文件树点击，于是完全没接管，
-  //   表现为"上下文里的 txt 点了没反应"（用户报的 bug）。
-  //   现在用一个 400ms 的轻量轮询盯着错误状态：只要出现"不可用"就接管，与入口无关。
+  // ★触发方式：**由"错误状态本身"触发**，不认入口。
+  //   因为打开文件不止一个入口（文件树 / 聊天提及 / 变更审查里的「打开文件」…），
+  //   它们都会走 file 地址、都会报错，但只有文件树那行有 [data-files-entry] 属性。
+  //   旧实现只监听文件树点击 → 别的入口"点了没反应"（用户报的 bug）。
   //
-  // 路径从哪来（按优先级）：
-  //   ① `[data-path-label]` —— 活动文件页签的**完整绝对路径**（实测：D:\deepseek\初始化设定.txt）
-  //   ② 文件树点击记录的相对路径（`[data-files-entry=file]` 的 `data-files-path`）
-  //      —— 实测 read 接口相对/绝对路径都收
-  //   注意：`data-textpreview-url`（dsh-resource://…）只在成功态才有，错误态拿不到，所以不靠它。
+  // ★路径确定方式（v1.1.2 修正）：**收集所有候选，逐个试 read，取第一个成功的**。
+  //   原因：右侧栏可同时挂多个页签，`[data-path-label]` 会有**多个值** ——
+  //   实测点变更审查卡片会开出「第 N 轮改动」页签，此时该标签是
+  //   `dsh-shell/README.txt`（变更审查那个页签的），而不是文件页签的。
+  //   光取"最后一个"会取错，于是表现为"非得先在文件树里点一次才行"（用户报的 bug）。
+  //   候选来源（去重后按序试）：
+  //     ① 所有 [data-path-label] 里"像路径"的值（含目录分隔符）
+  //     ② [data-textpreview-url] 里 URL 编码的路径（仅在成功态存在，聊备一格）
+  //     ③ 文件树点击记录的相对路径（[data-files-entry=file] 的 data-files-path）
+  //     ④ 页签标题里的文件名（兜底，只对工作区根目录下的文件有效）
+  //   全部试失败时，弹一个诊断浮层把"看到了什么"列出来，便于把截图发给 AI 定位。
   //
-  // 会话标识来源（★别再嗅探）：v1.0.18 钩 window.fetch/XHR 嗅探 workspaceFileScopeId
-  //   **实测抓不到**（本机捕获数为 0）——DSH 客户端在模块加载时就缓存了原始引用。
-  //   改为读 DOM 属性：[data-sidebar-right-session] / [data-conversation-session]。
+  // 会话标识来源（★别再嗅探）：钩 window.fetch/XHR 实测**捕获数为 0**
+  //   ——DSH 客户端在模块加载时就缓存了原始引用。改为读 DOM：
+  //   [data-sidebar-right-session] / [data-conversation-session]。
   //
   // 接口契约（实测）：
   //   POST /api/workspaceFiles/read
@@ -1335,7 +1339,8 @@ struct Index {
   //   ⚠️ offset 是**行号且最小为 1**（传 0 返回 bad-request）。
   //
   // 其他历次反馈对应的改动：
-  //   · 打开后自动关掉原版那个报错页签（用 data-dockkit-tab-close，按"选中页签"优先匹配）
+  //   · 打开后自动关掉原版那个报错页签（用 data-dockkit-tab-close；按"选中页签"优先匹配，
+  //     免得误关同名的变更审查页签）
   //   · 等得太久 → 文件树点击时**立刻预取**内容（轮询 100ms）
   //   · 界面太素 → 仿原版：等宽字体、路径条、「自动换行/取消换行」「重新读取」「关闭」
   //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
@@ -1353,11 +1358,7 @@ struct Index {
       + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
       + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
       + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
-      // 关掉 DSH 里那个报错页签：
-      //   优先匹配"当前选中"的页签（避免误关同名的变更审查页签），
-      //   并用 data-dockkit-tab-close 直接点它的关闭按钮（比按文字找按钮可靠）。
-      + 'function closeDshTab(name){try{if(!name)return false;'
-      + 'var cand=null,i;'
+      + 'function closeDshTab(name){try{if(!name)return false;var cand=null,i;'
       + 'var sel=document.querySelectorAll("[aria-selected=true]");'
       + 'for(i=0;i<sel.length;i++){if((sel[i].innerText||"").indexOf(name)>=0){cand=sel[i];break;}}'
       + 'if(!cand){var ts=document.querySelectorAll("[data-dockkit-tab]");'
@@ -1391,7 +1392,7 @@ struct Index {
       + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
       + 'var bar=document.createElement("div");'
       + 'bar.style.cssText="display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid "+bd+";background:"+hb+";flex:0 0 auto;";'
-      + 'var pth=document.createElement("div");pth.textContent=(v&&v.absolutePath)||path;'
+      + 'var pth=document.createElement("div");pth.textContent=(v&&v.absolutePath)||path||"";'
       + 'pth.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:"+sub+";font-family:"+mono+";";'
       + 'function mkbtn(label,on){var b=document.createElement("button");b.textContent=label;'
       + 'b.style.cssText="border:1px solid "+bd+";background:"+bt+";color:"+fg+";border-radius:7px;padding:5px 11px;font-size:12.5px;white-space:nowrap;";'
@@ -1431,35 +1432,74 @@ struct Index {
       + 'if(fromEdge&&dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
       + 'document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
-      + 'function show(path){var go=function(v){render(v,path);closeDshTab(base(path));};'
-      + 'if(prefetch){var pv=prefetch;prefetch=null;go(pv);}else{rd(path,1,go);}}'
+      // 候选路径：全部收集，去重
+      + 'function candidates(){var out=[],seen={};'
+      + 'function push(p){if(!p)return;p=String(p).trim();if(!p||seen[p])return;seen[p]=1;out.push(p);}'
+      + 'try{var els=document.querySelectorAll("[data-path-label]");'
+      + 'for(var i=0;i<els.length;i++){var t=(els[i].innerText||"").trim();'
+      + 'if(t&&(t.indexOf("/")>=0||t.indexOf("\\\\")>=0))push(t);}}catch(e){}'
+      + 'try{var us=document.querySelectorAll("[data-textpreview-url]");'
+      + 'for(i=0;i<us.length;i++){var u=us[i].getAttribute("data-textpreview-url")||"";'
+      + 'var m=u.match(/\\/session\\/[^\\/]+\\/(.+)$/);'
+      + 'if(m){try{push(decodeURIComponent(m[1]));}catch(e2){}}}}catch(e){}'
+      + 'push(lastPath);'
+      + 'try{var ts=document.querySelectorAll("[data-dockkit-tab]");'
+      + 'for(i=0;i<ts.length;i++){var nm=(ts[i].innerText||"").trim();'
+      + 'if(nm&&nm.indexOf(".")>0&&nm.length<80)push(nm);}}catch(e){}'
+      + 'return out;}'
+      // 逐个试读，取第一个成功的
+      + 'function tryAll(list,idx,cb){'
+      + 'if(!list||idx>=list.length){cb(null,null);return;}'
+      + 'rd(list[idx],1,function(v){'
+      + 'if(v&&typeof v.text==="string"&&v.text.length>=0){cb(v,list[idx]);}'
+      + 'else{tryAll(list,idx+1,cb);}});}'
+      // 全部失败时：把"看到了什么"显示出来，便于把截图发给 AI 定位
+      + 'function showDiag(list){var lines=[];'
+      + 'lines.push("无法确定要读哪个文件。请把本页截图发给 AI。");'
+      + 'lines.push("");'
+      + 'lines.push("会话标识 scope = "+(getScope()||"（空）"));'
+      + 'lines.push("尝试过的候选路径（"+list.length+" 个）：");'
+      + 'for(var i=0;i<list.length;i++)lines.push("  "+i+". "+list[i]);'
+      + 'try{var els=document.querySelectorAll("[data-path-label]");'
+      + 'lines.push("");lines.push("[data-path-label] 共 "+els.length+" 个：");'
+      + 'for(i=0;i<els.length;i++)lines.push("  · "+(els[i].innerText||"").trim());}catch(e){}'
+      + 'try{var ts=document.querySelectorAll("[data-dockkit-tab]");'
+      + 'lines.push("");lines.push("页签："+Array.prototype.map.call(ts,function(t){return (t.innerText||"").trim();}).join(" | "));}catch(e){}'
+      + 'try{var er=document.querySelector("[data-textpreview-state=loading]");'
+      + 'lines.push("");lines.push("错误元素 HTML（截断）：");'
+      + 'lines.push(er?String(er.outerHTML).slice(0,400):"（没找到）");}catch(e){}'
+      + 'render({text:lines.join("\\n"),absolutePath:"诊断"},null);}'
+      // 首次处理：优先用文件树点击时的预取（那条路径几乎无等待）
+      + 'function show(path,preset){'
+      + 'var done=function(v,used){if(v){render(v,used||path);closeDshTab(base(used||path));}'
+      + 'else{showDiag(candidates());}};'
+      + 'if(preset&&prefetch){var pv=prefetch;prefetch=null;done(pv,path);return;}'
+      + 'if(path){done(null,path);rd(path,1,function(v){done(v,path);});return;}'
+      + 'var list=candidates();'
+      + 'if(preset&&prefetch){var pv2=prefetch;prefetch=null;done(pv2,list[0]);return;}'
+      + 'if(!list.length){showDiag(list);return;}'
+      + 'tryAll(list,0,done);}'
       + 'function findErr(){try{var ds=document.querySelectorAll("[data-textpreview-state=loading]");'
       + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();'
       + 'if(r.width>0&&r.height>0&&(ds[i].innerText||"").indexOf("不可用")>=0)return true;}}catch(e){}return false;}'
-      // 解析"当前失败的是哪个文件"：优先 data-path-label（完整绝对路径），退回点击记录
-      + 'function resolvePath(){try{'
-      + 'var els=document.querySelectorAll("[data-path-label]");'
-      + 'for(var i=els.length-1;i>=0;i--){var t=(els[i].innerText||"").trim();if(!t)continue;'
-      + 'var seg=base(t);'
-      + 'if(seg&&seg.indexOf(".")>0&&(t.indexOf("/")>=0||t.indexOf("\\\\")>=0))return t;}}catch(e){}'
-      + 'return lastPath;}'
-      // 文件树点击：记录路径 + 立刻预取（这条路径下几乎无等待）
       + 'function watchFast(){if(timer)clearInterval(timer);var n=0;'
       + 'timer=setInterval(function(){n++;'
-      + 'if(findErr()&&lastPath){clearInterval(timer);timer=null;show(lastPath);return;}'
+      + 'if(findErr()&&lastPath&&!shown){clearInterval(timer);timer=null;show(lastPath,true);return;}'
       + 'if(n>25||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},100);}'
       + 'document.addEventListener("click",function(e){try{var n=e.target;while(n&&n!==document){'
       + 'if(n.getAttribute&&n.getAttribute("data-files-entry")==="file"&&n.getAttribute("data-files-path")){'
       + 'lastPath=n.getAttribute("data-files-path");prefetch=null;'
       + 'rd(lastPath,1,function(v){prefetch=v;});'
       + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
-      // ★兜底总闸：不管从哪个入口（聊天提及、变更审查「打开文件」、文件树…）触发的，
-      //   只要右侧栏出现"不可用"就接管。用 errSig 防止同一处反复弹出。
+      // ★兜底总闸：不管从哪个入口触发，只要右侧栏出现"不可用"就接管
       + 'setInterval(function(){try{'
+      + 'if(shown)return;'
       + 'if(!findErr()){errSig="";return;}'
-      + 'var p=resolvePath();if(!p)return;'
-      + 'if(p===errSig)return;'
-      + 'errSig=p;show(p);'
+      + 'var list=candidates();'
+      + 'var sig=list.join("|");'
+      + 'if(!list.length){if(errSig!=="__none__"){errSig="__none__";showDiag(list);}return;}'
+      + 'if(sig===errSig)return;'
+      + 'errSig=sig;show(null,false);'
       + '}catch(e){}},400);'
       + '})()');
   }
