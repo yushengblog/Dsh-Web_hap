@@ -1308,29 +1308,40 @@ struct Index {
   // 背景：手机端 DSH 的文件查看器对 dsh-resource://file/… 一律显示
   //   "文件资源服务不可用"（DSH 客户端的 file 资源提供方在本 App 的 ArkWeb 里没注册），
   //   而 dsh-resource://changes-review/… 正常 —— 只有 file 这一类提供方缺失。
-  // 已实测排除：注入脚本、JS 报错、窄屏、缺新 API、UA、插件未加载、Web 组件属性（9 处）。
   // 方案：不依赖那个提供方，改用**同源 fetch** 直调 /api/workspaceFiles/read 取内容自行渲染。
   //
-  // 会话标识来源（★别再用嗅探）：v1.0.18 钩 window.fetch/XHR 嗅探 workspaceFileScopeId
+  // ★触发方式（v1.1.1 修正）：**由"错误状态本身"触发，不再只认文件树的点击**。
+  //   原因：聊天上下文里的文件提及、变更审查里的「打开文件」等入口，点了同样会走 file 地址、
+  //   同样报错，但它们没有 [data-files-entry] 属性 —— 旧实现只监听文件树点击，于是完全没接管，
+  //   表现为"上下文里的 txt 点了没反应"（用户报的 bug）。
+  //   现在用一个 400ms 的轻量轮询盯着错误状态：只要出现"不可用"就接管，与入口无关。
+  //
+  // 路径从哪来（按优先级）：
+  //   ① `[data-path-label]` —— 活动文件页签的**完整绝对路径**（实测：D:\deepseek\初始化设定.txt）
+  //   ② 文件树点击记录的相对路径（`[data-files-entry=file]` 的 `data-files-path`）
+  //      —— 实测 read 接口相对/绝对路径都收
+  //   注意：`data-textpreview-url`（dsh-resource://…）只在成功态才有，错误态拿不到，所以不靠它。
+  //
+  // 会话标识来源（★别再嗅探）：v1.0.18 钩 window.fetch/XHR 嗅探 workspaceFileScopeId
   //   **实测抓不到**（本机捕获数为 0）——DSH 客户端在模块加载时就缓存了原始引用。
   //   改为读 DOM 属性：[data-sidebar-right-session] / [data-conversation-session]。
   //
   // 接口契约（实测）：
   //   POST /api/workspaceFiles/read
   //   {"type":"client-request","rpcId":"…","method":"workspaceFiles/read",
-  //    "payload":{"args":{"workspaceFileScopeId":"session-…","path":"相对路径",
+  //    "payload":{"args":{"workspaceFileScopeId":"session-…","path":"相对或绝对路径",
   //                       "range":{"offset":1,"limit":2000}}}}
   //   → {"result":{"ok":true,"value":{absolutePath,bytes,offset,lines,eof,text}}}
   //   ⚠️ offset 是**行号且最小为 1**（传 0 返回 bad-request）。
   //
-  // 用户历次反馈对应的改动：
-  //   · 打开后自动关掉原版那个报错页签（不然要手动关）
-  //   · 等得太久 → 点击时**立刻预取**内容，错误一出现马上渲染（轮询 100ms）
-  //   · 界面太素 → 仿原版：等宽字体、路径条、「自动换行」「重新读取」「关闭」按钮
-  //   · 要能侧滑关闭 → 支持右滑 + 系统返回键（经 setFileFix 上报开合状态）
+  // 其他历次反馈对应的改动：
+  //   · 打开后自动关掉原版那个报错页签（用 data-dockkit-tab-close，按"选中页签"优先匹配）
+  //   · 等得太久 → 文件树点击时**立刻预取**内容（轮询 100ms）
+  //   · 界面太素 → 仿原版：等宽字体、路径条、「自动换行/取消换行」「重新读取」「关闭」
+  //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var timer=null,lastPath=null,prefetch=null,shown=false;'
+      + 'var timer=null,lastPath=null,prefetch=null,shown=false,errSig="";'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1342,13 +1353,22 @@ struct Index {
       + 'if(x&&x!=="rgba(0, 0, 0, 0)"&&x!=="transparent"){c=x;break;}n=n.parentElement;}'
       + 'var m=c&&c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);if(!m)return false;'
       + 'return (0.299*(+m[1])+0.587*(+m[2])+0.114*(+m[3]))/255<0.5;}catch(e){return false;}}'
-      + 'function closeDshTab(name){try{var ts=document.querySelectorAll("[role=tab]");'
-      + 'for(var i=0;i<ts.length;i++){var t=ts[i];'
-      + 'if((t.innerText||"").indexOf(name)<0)continue;'
-      + 'var bs=t.querySelectorAll("button");'
-      + 'for(var j=0;j<bs.length;j++){var al=bs[j].getAttribute("aria-label")||"";'
-      + 'var tx=(bs[j].innerText||"").trim();'
-      + 'if(al.indexOf("关闭")>=0||al.indexOf("Close")>=0||tx==="\\u00d7"||tx==="\\u2715"){bs[j].click();return true;}}}}catch(e){}return false;}'
+      // 关掉 DSH 里那个报错页签：
+      //   优先匹配"当前选中"的页签（避免误关同名的变更审查页签），
+      //   并用 data-dockkit-tab-close 直接点它的关闭按钮（比按文字找按钮可靠）。
+      + 'function closeDshTab(name){try{if(!name)return false;'
+      + 'var cand=null,i;'
+      + 'var sel=document.querySelectorAll("[aria-selected=true]");'
+      + 'for(i=0;i<sel.length;i++){if((sel[i].innerText||"").indexOf(name)>=0){cand=sel[i];break;}}'
+      + 'if(!cand){var ts=document.querySelectorAll("[data-dockkit-tab]");'
+      + 'for(i=0;i<ts.length;i++){if((ts[i].innerText||"").indexOf(name)>=0){cand=ts[i];break;}}}'
+      + 'if(!cand)return false;'
+      + 'var id=cand.getAttribute("data-dockkit-tab");'
+      + 'if(id){var cb=document.querySelector("[data-dockkit-tab-close=\\""+id+"\\"]");if(cb){cb.click();return true;}}'
+      + 'var bs=cand.querySelectorAll("button");'
+      + 'for(i=0;i<bs.length;i++){var al=bs[i].getAttribute("aria-label")||"";var tx=(bs[i].innerText||"").trim();'
+      + 'if(al.indexOf("关闭")>=0||al.indexOf("Close")>=0||tx==="\\u00d7"||tx==="\\u2715"){bs[i].click();return true;}}'
+      + '}catch(e){}return false;}'
       + 'function rd(path,offset,cb){var sc=getScope();'
       + 'if(!sc){cb(null);return;}'
       + 'var body=JSON.stringify({type:"client-request",rpcId:"ff-"+Date.now()+"-"+Math.random().toString(36).slice(2),'
@@ -1380,8 +1400,6 @@ struct Index {
       + 'pre.style.cssText="flex:1;overflow:auto;margin:0;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:"+mono+";font-size:12.5px;line-height:1.65;";'
       + 'pre.textContent=(v&&typeof v.text==="string")?v.text:"（读取失败）";'
       + 'var wrapped=true;'
-      // 换行状态必须"一眼看得出来"（用户反馈：之前只有颜色深浅，看不出开还是关）。
-      // 仿原版 DSH：开启时写「自动换行」并高亮，关闭时写「取消换行」且不高亮。
       + 'function syncWrap(){'
       + 'wrapBtn.textContent=wrapped?"自动换行":"取消换行";'
       + 'wrapBtn.style.background=wrapped?(dk?"#182740":"#eaf1ff"):bt;'
@@ -1409,10 +1427,7 @@ struct Index {
       + 'var sx=null,sy=null;'
       + 'w.addEventListener("touchstart",function(e){var t=e.touches[0];sx=t.clientX;sy=t.clientY;},{passive:true});'
       + 'w.addEventListener("touchend",function(e){if(sx===null)return;var t=e.changedTouches[0];'
-      + 'var dx=t.clientX-sx,dy=t.clientY-sy;'
-      // 只在**从左边缘（<56px）起滑**时关闭（用户反馈：在正文里右滑会误触发关闭）。
-      // 这样正文区域的横向滑动不会关掉查看器；左边缘的返回手势仍由系统 back 走 onBackPress 关闭。
-      + 'var fromEdge=(sx<56);sx=null;'
+      + 'var dx=t.clientX-sx,dy=t.clientY-sy;var fromEdge=(sx<56);sx=null;'
       + 'if(fromEdge&&dx>70&&Math.abs(dy)<70){close();}},{passive:true});'
       + 'document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
@@ -1421,7 +1436,15 @@ struct Index {
       + 'function findErr(){try{var ds=document.querySelectorAll("[data-textpreview-state=loading]");'
       + 'for(var i=0;i<ds.length;i++){var r=ds[i].getBoundingClientRect();'
       + 'if(r.width>0&&r.height>0&&(ds[i].innerText||"").indexOf("不可用")>=0)return true;}}catch(e){}return false;}'
-      + 'function watch(){if(timer)clearInterval(timer);var n=0;'
+      // 解析"当前失败的是哪个文件"：优先 data-path-label（完整绝对路径），退回点击记录
+      + 'function resolvePath(){try{'
+      + 'var els=document.querySelectorAll("[data-path-label]");'
+      + 'for(var i=els.length-1;i>=0;i--){var t=(els[i].innerText||"").trim();if(!t)continue;'
+      + 'var seg=base(t);'
+      + 'if(seg&&seg.indexOf(".")>0&&(t.indexOf("/")>=0||t.indexOf("\\\\")>=0))return t;}}catch(e){}'
+      + 'return lastPath;}'
+      // 文件树点击：记录路径 + 立刻预取（这条路径下几乎无等待）
+      + 'function watchFast(){if(timer)clearInterval(timer);var n=0;'
       + 'timer=setInterval(function(){n++;'
       + 'if(findErr()&&lastPath){clearInterval(timer);timer=null;show(lastPath);return;}'
       + 'if(n>25||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},100);}'
@@ -1429,7 +1452,15 @@ struct Index {
       + 'if(n.getAttribute&&n.getAttribute("data-files-entry")==="file"&&n.getAttribute("data-files-path")){'
       + 'lastPath=n.getAttribute("data-files-path");prefetch=null;'
       + 'rd(lastPath,1,function(v){prefetch=v;});'
-      + 'watch();break;}n=n.parentElement;}}catch(x){}},true);'
+      + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
+      // ★兜底总闸：不管从哪个入口（聊天提及、变更审查「打开文件」、文件树…）触发的，
+      //   只要右侧栏出现"不可用"就接管。用 errSig 防止同一处反复弹出。
+      + 'setInterval(function(){try{'
+      + 'if(!findErr()){errSig="";return;}'
+      + 'var p=resolvePath();if(!p)return;'
+      + 'if(p===errSig)return;'
+      + 'errSig=p;show(p);'
+      + '}catch(e){}},400);'
       + '})()');
   }
 
