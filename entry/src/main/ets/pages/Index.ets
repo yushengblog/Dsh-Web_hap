@@ -24,7 +24,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3682'
+const BUILD_TAG: string = '构建 v10-01-3692'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -80,6 +80,8 @@ interface ShellBridge {
   setDialog: (v: number) => void;
   getCurLabel: () => string;
   openSwitcher: () => void;
+  // 诊断：把一段文字直接打到界面红条上
+  dbg: (m: string) => void;
   // 网页上报当前是否深色（原生页面与状态栏条据此上色）
   setDark: (v: number) => void;
 }
@@ -1299,6 +1301,30 @@ struct Index {
   }
 
   injectAll(): void {
+    // ── 诊断注入（不受 INJECT_ENABLED 影响）──
+    // 目的：查清"手机端点文件后为什么一个 stat 请求都不发"。
+    // 依据（来自 DSH 客户端源码）：点文件 → openResource(fileAddressFor(session,root,path))
+    //   → 侧栏开标签 → 资源解析器把 dsh-resource:// 地址解析成 workspaceFileScope+path
+    //   → 才发 workspaceFiles/stat。解析不到就显示"文件资源服务不可用"且不发请求。
+    // 这里把"点的是哪个路径 / 现在有哪些页签 / 文件树根 / 是否有失败码"打回原生红条。
+    this.js('(function(){if(window.__dshDbg){return;}window.__dshDbg=1;'
+      + 'document.addEventListener("click",function(e){try{'
+      + 'var n=e.target;while(n&&n!==document){if(n.getAttribute&&n.getAttribute("data-files-path")){'
+      + 'window.__dshLastPath=n.getAttribute("data-files-path");break;}n=n.parentElement;}}catch(x){}},true);'
+      + 'setInterval(function(){try{'
+      + 'var st=document.querySelector("[data-textpreview-state=loading]");'
+      + 'if(!st)return;'
+      + 'var ts=document.querySelectorAll("[role=tab]"),ls=[];'
+      + 'for(var i=0;i<ts.length;i++){var x=(ts[i].innerText||"").trim();if(x)ls.push(x);}'
+      + 'var r=document.querySelector("[data-files-root]");'
+      + 'var c=document.querySelector("[data-files-code]");'
+      + 'var u=document.querySelector("[data-textpreview-url]");'
+      + 'window.dshShell.dbg("点:"+(window.__dshLastPath||"-")'
+      + '+" | 页签:"+ls.join("/")'
+      + '+" | root:"+(r?r.getAttribute("data-files-root"):"-")'
+      + '+" | 失败码:"+(c?c.getAttribute("data-files-code"):"-")'
+      + '+" | 预览url:"+(u?u.getAttribute("data-textpreview-url"):"-"));'
+      + '}catch(e){}},1500);})()');
     if (!this.injectEnabled) {
       return;
     }
@@ -1462,6 +1488,9 @@ struct Index {
       },
       openSites: (): void => {
         this.backToPicker();
+      },
+      dbg: (m: string): void => {
+        this.webConsoleErr = m;
       },
       setOverlay: (v: number): void => {
         this.webOverlay = (v === 1);
@@ -2641,7 +2670,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
@@ -2699,7 +2728,7 @@ struct Index {
         .onConsole((event) => {
           try {
             if (event && event.message) {
-              if (event.message.getMessageLevel() === MessageLevel.Error) {
+              if (true) {
                 const one = '[' + event.message.getSourceId() + ':'
                   + event.message.getLineNumber().toString() + '] '
                   + event.message.getMessage();
