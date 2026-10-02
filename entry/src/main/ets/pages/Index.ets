@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -18,7 +18,7 @@ const PHASE_LOADING: number = 1;
 const PHASE_WEB: number = 2;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3612'
+const BUILD_TAG: string = '构建 v10-01-3622'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1308,6 +1308,9 @@ struct Index {
       + 'function iv(el){try{if(!el)return false;var r=el.getBoundingClientRect();'
       + 'return r.width>0&&r.height>0&&r.left<window.innerWidth&&r.right>0&&r.top<window.innerHeight&&r.bottom>0;}catch(e){return false;}}'
       + 'window.__dshRightOpen=function(){try{'
+      // 只有"折叠态"（窄屏）下右侧栏才是占满屏的浮层、才值得用返回键收起；
+      // 展开态（内屏 >600）它是常驻分栏，返回键不应该把它收起来。
+      + 'if(window.innerWidth>600)return false;'
       + 'if(iv(document.querySelector("[aria-label=\'打开右侧边栏\']")))return false;'
       + 'return iv(document.querySelector("[aria-label=\'收起右侧边栏\']"));}catch(e){return false;}};'
       + 'window.__dshDialogOpen=function(){try{var ds=document.querySelectorAll("[role=dialog],[aria-modal=true]");'
@@ -1421,9 +1424,11 @@ struct Index {
     if (this.phase === PHASE_WEB) {
       // 返回的三级行为（按用户要求）：
       //   ① 网页里开着弹窗（DSH 设置等）→ 先关弹窗
-      //   ② 右侧边栏展开（窄屏下占满屏）→ 先收起右侧边栏
-      //   ③ 都没有 → 就是"返回主屏/退出 App"
-      // 这两个状态由注入脚本按「元素是否在视口内」上报（只看元素存在会永远为真，见 ⑦ 的注释）。
+      //   ② 右侧边栏展开**且处于折叠态（窄屏占满屏）** → 先收起它
+      //      （展开态/内屏下右侧栏是常驻分栏，返回键不收起它）
+      //   ③ 都没有 → 两段式退出 App（第一次提示"再按一次退出"）
+      // 这两个状态由注入脚本按「元素是否在视口内 + innerWidth」上报
+      // （只看元素是否存在会永远为真，见 ⑦ 的注释）。
       if (this.dialogOpen) {
         try {
           this.controller.runJavaScript('window.__dshCloseDialog && window.__dshCloseDialog()');
@@ -1440,9 +1445,16 @@ struct Index {
         this.webOverlay = false;
         return true;
       }
-      // ③ 主页面：直接退出 App（让系统处理返回 → 回桌面）。
-      //    不再做"再按一次退出"——用户明确要求主页面侧滑就是退出。
-      return false;
+      // ③ 主页面：两段式退出（第一次提示"再按一次退出"，2 秒内再按才真正退出）
+      //    注意：右侧栏只在"折叠态（窄屏）"才算需要收起的浮层，
+      //    展开态它是常驻分栏，返回键不碰它（由注入脚本按 innerWidth 判定）。
+      const t2 = Date.now();
+      if (t2 - this.lastBackTime < 2000) {
+        return false;
+      }
+      this.lastBackTime = t2;
+      promptAction.showToast({ message: '再按一次退出', duration: 2000 });
+      return true;
     }
     if (this.phase === PHASE_LOADING || this.phase === -1) {
       this.backToPicker();
