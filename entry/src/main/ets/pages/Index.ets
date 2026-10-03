@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -1448,20 +1448,44 @@ struct Index {
       // 面板里"正在显示图片"的绝对路径 —— 用于**主动接管图片**。
       // 起因：官方图片查看器能显示成功（没有报错），所以"按报错触发"根本轮不到我，
       // 而官方那个**不能放大**。所以图片改为按"面板出现图片"触发。
+      // ★只认**右侧栏里**的图片 —— 聊天里内联的图片（消息缩略图）绝不能触发。
+      // 【踩过的坑】第一版优先匹配 src 含 /api/file?path= 的 <img>，
+      //   而**聊天内联图正是这种 src**，真正的预览反而是 blob:
+      //   → 展开一条含图的消息会莫名弹出查看器；关掉查看器后又会命中下一条内联图。
+      // 现在改为：① 只在 [data-dockkit-content]（右侧栏页签内容）里找
+      //           ② 排除小图（图标/头像，naturalWidth < 160）
+      //           ③ 优先 blob:（官方就是取字节造 blob），路径从页签标签取
       + 'function activeImagePath(){try{'
-      // 优先：DSH 自己的图片接口 URL 里就带绝对路径
-      + 'var ims=document.querySelectorAll("img[src*=\\"/api/file?path=\\"]");'
-      + 'for(var i=ims.length-1;i>=0;i--){var r=ims[i].getBoundingClientRect();'
-      + 'if(!(r.width>0&&r.height>0))continue;'
-      + 'var s=ims[i].getAttribute("src")||"";var m=s.match(/[?&]path=([^&]+)/);'
-      + 'if(m){try{return decodeURIComponent(m[1]);}catch(e){}}}'
-      // 其次：blob 图 + 页签的路径标签
-      + 'var bs=document.querySelectorAll("img[src^=\\"blob:\\"]");'
-      + 'for(i=bs.length-1;i>=0;i--){var r2=bs[i].getBoundingClientRect();'
-      + 'if(!(r2.width>0&&r2.height>0))continue;'
+      + 'var panes=document.querySelectorAll("[data-dockkit-content]");'
+      + 'for(var pi=panes.length-1;pi>=0;pi--){var P=panes[pi];'
+      + 'var r0=P.getBoundingClientRect();if(!(r0.width>0&&r0.height>0))continue;'
+      + 'var ims=P.querySelectorAll("img");'
+      + 'for(var i=ims.length-1;i>=0;i--){var im=ims[i];'
+      + 'if((im.naturalWidth||0)<160)continue;'
+      + 'var r=im.getBoundingClientRect();if(!(r.width>80&&r.height>80))continue;'
+      + 'var s=im.getAttribute("src")||"";'
+      + 'if(s.indexOf("blob:")===0){'
       + 'var l=document.querySelectorAll("[data-path-label]");'
-      + 'for(var j=l.length-1;j>=0;j--){var tt=(l[j].innerText||"").trim();if(isImg(tt))return tt;}}'
-      + '}catch(e){}return null;}'
+      + 'for(var j=l.length-1;j>=0;j--){var tt=(l[j].innerText||"").trim();'
+      + 'if(isImg(tt))return {path:tt,pane:P};}}'
+      + 'var m=s.match(/[?&]path=([^&]+)/);'
+      + 'if(m){try{return {path:decodeURIComponent(m[1]),pane:P};}catch(e){}}'
+      // ⚠️ 这里要 **3 个**右花括号：已开的块是 for(pi) / for(i) / 以及最外层的 try，
+      //    关掉这三个之后紧接的 catch 才是 try 的。
+      //    （本次为这个花括号数错了两次：errTabName 和多一个、这里和 closePane 各错一次；
+      //      **别靠肉眼数，抽出来 node --check，并用脚本打印每个 try 的配平位置**。）
+      + '}}}catch(e){}return null;}'
+      // 关掉"官方那个图片预览页签" —— 从页签内容容器拿到 tabN，再点它的关闭按钮。
+      // 这样只留本查看器一层（用户反馈：原来官方一层 + 我这一层，关掉我的官方还在）。
+      + 'function closePane(pane){try{var n=pane,d=0;'
+      + 'while(n&&n!==document&&d<6){d++;'
+      + 'if(n.getAttribute){var id=n.getAttribute("data-dockkit-content");'
+      + 'if(id){var cb=document.querySelector("[data-dockkit-tab-close=\\""+id+"\\"]");'
+      + 'if(cb){cb.click();return true;}}}}'
+      // ⚠️ 这里只 **1 个**右花括号：上面 `if(cb){…}}}}` 已经把 while 也关掉了
+      //    （它是**有块**的 if，比无块的写法多开一个），所以只需 1 个关 try。
+      //    写 2 个会把 function 一起关掉，catch 就悬空了。
+      + 'n=n.parentElement;}catch(e){}return false;}'
       + 'function imgCandidate(){var l=candidates();'
       + 'for(var i=0;i<l.length;i++){if(isImg(l[i]))return l[i];}return null;}'
       + 'function dark(){try{var el=document.querySelector("[class*=sidebarCol]")||document.body;'
@@ -1759,10 +1783,12 @@ struct Index {
       + 'if(shown)return;'
       // ★图片主动接管：官方图片查看器不能放大，所以图片一律由本查看器渲染（带缩放）。
       //   注意用 imgDone 去重，否则用户关掉浮层后会立刻又被弹出来。
-      + 'var ip=activeImagePath();'
-      + 'if(ip){if(ip!==imgDone){imgDone=ip;lastUsed=ip;renderImage(ip);'
-      + 'closeErrTab();closeDshTab(base(ip));'
-      + 'setTimeout(function(){closeErrTab();closeDshTab(base(ip));},350);}return;}'
+      + 'var ir=activeImagePath();'
+      + 'if(ir&&ir.path){'
+      + 'if(ir.path!==imgDone){imgDone=ir.path;lastUsed=ir.path;renderImage(ir.path);'
+      // 接管后**关掉官方那个预览页签**：只留一层，避免"关掉我的官方还在"
+      + 'closePane(ir.pane);setTimeout(function(){closePane(ir.pane);},350);}'
+      + 'return;}'
       + 'imgDone="";'
       + 'if(!findErr()){errSig="";return;}'
       // 图片之外的二进制（pdf/zip/视频…）：**完全不接管**，交给官方查看器。
