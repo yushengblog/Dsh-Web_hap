@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
@@ -40,6 +40,26 @@ const BUILD_TAG: string = '构建 v10-01-3712'
 //   **不 preventDefault** —— 让 contenteditable 的默认行为插入换行。
 // 发送改用界面上的发送按钮（蓝色圆形）。
 // 注：带 Shift/Ctrl/Alt/Meta 的回车不拦（原本就不发送，走原生换行即可）。
+// ── 上下文里的图片：点击就拦下来，官方那个**根本不打开** ──────────────
+// 用户要求：会话里的图片点开就用本 App 的查看器，不要官方那个（原来两个都开、
+//   或者官方先开我再关，会有闪烁也不可靠）。
+// ⚠️ 拦截**必须在文档开始注册**才抢得过 DSH 的点击处理器 ——
+//   而渲染函数在晚注入的查看器里，所以这里只"拦 + 记 + 发事件"，
+//   由查看器接事件渲染（同时把路径留在 __dshImgWant 上做兜底）。
+// 只拦会话区的内联图；右侧栏里的预览走另一条路（那是由页签渲染的，见 activeImagePath）。
+const CONTEXT_IMG_JS: string = '(function(){try{'
+  + 'document.addEventListener("click",function(e){try{'
+  + 'var t=e.target;if(!t||t.tagName!=="IMG")return;'
+  + 'if(t.closest&&t.closest("[data-dockkit-content]"))return;'
+  + 'var s=t.getAttribute("src")||"";'
+  + 'var m=s.match(/[?&]path=([^&]+)/);if(!m)return;'
+  + 'var p;try{p=decodeURIComponent(m[1]);}catch(x){return;}'
+  + 'if(!/[.](png|jpe?g|jpe|gif|webp|bmp|ico|avif|tiff?|heic|heif)$/i.test(p))return;'
+  + 'e.preventDefault();e.stopImmediatePropagation();'
+  + 'window.__dshImgWant=p;'
+  + 'try{window.dispatchEvent(new CustomEvent("dsh-img-want",{detail:p}));}catch(x){}'
+  + '}catch(x){}},true);}catch(e){}})()';
+
 const ENTER_AS_NEWLINE_JS: string = '(function(){try{'
   + 'window.addEventListener("keydown",function(e){try{'
   + 'if(e.key!=="Enter"&&e.keyCode!==13)return;'
@@ -1779,10 +1799,16 @@ struct Index {
       + 'rd(lastPath,1,function(v){prefetch=v;});'
       + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
       // ★兜底总闸：任何入口触发的错误都接管
+      // 接"上下文图片被点击"的通知，**立刻**渲染（文档期脚本拦的，官方不会打开）
+      + 'function wantImg(p){try{if(!p||!isImg(p))return;'
+      + 'if(p===imgDone)return;imgDone=p;lastUsed=p;renderImage(p);}catch(e){}}'
+      + 'try{window.addEventListener("dsh-img-want",function(e){wantImg(e&&e.detail);});}catch(e){}'
       + 'setInterval(function(){try{'
       + 'if(shown)return;'
       // ★图片主动接管：官方图片查看器不能放大，所以图片一律由本查看器渲染（带缩放）。
       //   注意用 imgDone 去重，否则用户关掉浮层后会立刻又被弹出来。
+      // 兜底：文档期拦下的路径（事件可能因时序没接住）
+      + 'if(window.__dshImgWant){var _w=window.__dshImgWant;window.__dshImgWant=null;wantImg(_w);return;}'
       + 'var ir=activeImagePath();'
       + 'if(ir&&ir.path){'
       + 'if(ir.path!==imgDone){imgDone=ir.path;lastUsed=ir.path;renderImage(ir.path);'
@@ -3156,7 +3182,12 @@ struct Index {
         .javaScriptAccess(true)
         .domStorageAccess(true)
         // 回车=换行（必须在文档开始注册，才能抢在 DSH 的处理器之前）
-        .javaScriptOnDocumentStart([{ script: ENTER_AS_NEWLINE_JS, scriptRules: ['*'] }])
+        .javaScriptOnDocumentStart([
+          // 上下文图片：点击就拦（官方不打开）
+          { script: CONTEXT_IMG_JS, scriptRules: ['*'] },
+          // 回车=换行（必须在文档开始注册，才能抢在 DSH 的处理器之前）
+          { script: ENTER_AS_NEWLINE_JS, scriptRules: ['*'] }
+        ])
         // 声明系统软键盘的回车键类型为「换行」(NEWLINE)。
         // ★这里踩过两次：
         //   ① 不声明（UNSPECIFIED）→ 输入框上一直显示"发送"，小艺的长按换行无效。
