@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager, wantConstant, Want } from '@kit.AbilityKit';
@@ -1784,7 +1784,13 @@ struct Index {
       + 'var dk=dark();'
       + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
       + 'sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5",ac=dk?"#4c8dff":"#2f6fed";'
-      + 'var abs=absOf(path)||path;var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
+      // ⚠️ 必须用**绝对路径**：实测 /api/file?path= 收到相对路径会返回 HTTP 400
+      //    （页签标题就是相对的文件名，直接拿来拼 URL 会踩这个坑）
+      + 'var abs=null;'
+      + 'try{var cl=candidates();for(var ci=0;ci<cl.length;ci++){var cs=cl[ci];'
+      + 'if(cs&&/^[a-zA-Z]:[\\/]/.test(cs)&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
+      + 'if(!abs)abs=absOf(path);if(!abs)abs=path;'
+      + 'var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
       + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
       + 'var bar=document.createElement("div");'
@@ -1829,7 +1835,7 @@ struct Index {
       + 'try{'
       + 'var url=location.origin+"/api/file?path="+encodeURIComponent(abs);'
       + 'var r=await fetch(url,{credentials:"include"});'
-      + 'if(!r.ok){ob.textContent="下载失败（HTTP "+r.status+"）";ob.disabled=false;return;}'
+      + 'if(!r.ok){ob.textContent="下载失败 HTTP "+r.status+"  "+url;ob.disabled=false;return;}'
       + 'var len=Number(r.headers.get("content-length")||0);'
       + 'var th=Number(window.dshShell.getThreshold()||"200");'
       + 'if(th>0&&len>th*1048576){'
