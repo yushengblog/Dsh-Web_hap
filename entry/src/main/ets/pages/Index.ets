@@ -1411,7 +1411,7 @@ struct Index {
   }
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="";'
+      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="";'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1488,6 +1488,23 @@ struct Index {
       + 'document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
       // 从候选里挑一个"图片"路径
+      // 面板里"正在显示图片"的绝对路径 —— 用于**主动接管图片**。
+      // 起因：官方图片查看器能显示成功（没有报错），所以"按报错触发"根本轮不到我，
+      // 而官方那个**不能放大**。所以图片改为按"面板出现图片"触发。
+      + 'function activeImagePath(){try{'
+      // 优先：DSH 自己的图片接口 URL 里就带绝对路径
+      + 'var ims=document.querySelectorAll("img[src*=\\"/api/file?path=\\"]");'
+      + 'for(var i=ims.length-1;i>=0;i--){var r=ims[i].getBoundingClientRect();'
+      + 'if(!(r.width>0&&r.height>0))continue;'
+      + 'var s=ims[i].getAttribute("src")||"";var m=s.match(/[?&]path=([^&]+)/);'
+      + 'if(m){try{return decodeURIComponent(m[1]);}catch(e){}}}'
+      // 其次：blob 图 + 页签的路径标签
+      + 'var bs=document.querySelectorAll("img[src^=\\"blob:\\"]");'
+      + 'for(i=bs.length-1;i>=0;i--){var r2=bs[i].getBoundingClientRect();'
+      + 'if(!(r2.width>0&&r2.height>0))continue;'
+      + 'var l=document.querySelectorAll("[data-path-label]");'
+      + 'for(var j=l.length-1;j>=0;j--){var tt=(l[j].innerText||"").trim();if(isImg(tt))return tt;}}'
+      + '}catch(e){}return null;}'
       + 'function imgCandidate(){var l=candidates();'
       + 'for(var i=0;i<l.length;i++){if(isImg(l[i]))return l[i];}return null;}'
       + 'function dark(){try{var el=document.querySelector("[class*=sidebarCol]")||document.body;'
@@ -1783,6 +1800,13 @@ struct Index {
       // ★兜底总闸：任何入口触发的错误都接管
       + 'setInterval(function(){try{'
       + 'if(shown)return;'
+      // ★图片主动接管：官方图片查看器不能放大，所以图片一律由本查看器渲染（带缩放）。
+      //   注意用 imgDone 去重，否则用户关掉浮层后会立刻又被弹出来。
+      + 'var ip=activeImagePath();'
+      + 'if(ip){if(ip!==imgDone){imgDone=ip;lastUsed=ip;renderImage(ip);'
+      + 'closeErrTab();closeDshTab(base(ip));'
+      + 'setTimeout(function(){closeErrTab();closeDshTab(base(ip));},350);}return;}'
+      + 'imgDone="";'
       + 'if(!findErr()){errSig="";return;}'
       // 图片之外的二进制（pdf/zip/视频…）：**完全不接管**，交给官方查看器。
       + 'if(isOtherBin(errTabName())){errSig="__bin__";return;}'
