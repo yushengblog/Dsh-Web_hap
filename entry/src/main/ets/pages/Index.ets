@@ -1,13 +1,13 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
+import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
-import { common, bundleManager } from '@kit.AbilityKit';
+import { common, bundleManager, wantConstant, Want } from '@kit.AbilityKit';
 import { window, promptAction } from '@kit.ArkUI';
-import { picker } from '@kit.CoreFileKit';
+import { picker, fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { inputMethod } from '@kit.IMEKit';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { http } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
 
 const DOMAIN: number = 0x0000;
@@ -116,6 +116,8 @@ interface ShellBridge {
   getSafeBottom: () => number;
   log: (m: string) => void;
   openSites: () => void;
+  // 下载并用系统应用打开（office/pdf）
+  openFile: (json: string) => void;
   setOverlay: (v: number) => void;
   // 自建文件查看器的开合状态（返回键/侧滑据此先关它）
   setFileFix: (v: number) => void;
@@ -1386,9 +1388,74 @@ struct Index {
   //   · 等得太久 → 文件树点击时立刻预取（轮询 100ms）
   //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
   //   · 关闭查看器时也再收一次报错页签，并延迟 350ms 重试
+  // ── 下载并用**系统应用**打开 office / pdf ──────────────────────────
+  // 为什么必须走系统应用：真机实测 DSH 自带的 docx/xlsx/pptx/pdf 渲染器
+  //   在 ArkWeb 里起不来（报「预览器 xxx 不可用」，注意**不是**"文件资源服务不可用"），
+  //   所以"交还官方"对这几类是死路。
+  // 下载用 http + WebView 的 Cookie（同源，带凭据），避免把文件搬成 base64 过大。
+  async openWithSystem(json: string): Promise<void> {
+    let url = '';
+    let name = 'file';
+    let mime = 'application/octet-stream';
+    try {
+      const o = JSON.parse(json) as Record<string, string>;
+      url = o.url;
+      name = o.name || name;
+      mime = o.mime || mime;
+    } catch (e) {
+      return;
+    }
+    if (!url) {
+      return;
+    }
+    try {
+      let cookie = '';
+      try {
+        cookie = await webview.WebCookieManager.getCookie(url);
+      } catch (e) {
+      }
+      const req = http.createHttp();
+      const resp = await req.request(url, {
+        method: http.RequestMethod.GET,
+        header: { 'Cookie': cookie },
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        connectTimeout: 15000,
+        readTimeout: 120000
+      });
+      req.destroy();
+      if (resp.responseCode !== 200) {
+        promptAction.showToast({ message: '下载失败（HTTP ' + resp.responseCode + '）' });
+        return;
+      }
+      const buf = resp.result as ArrayBuffer;
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const dir = ctx.cacheDir + '/openwith';
+      try {
+        fileIo.mkdirSync(dir);
+      } catch (e) {
+      }
+      const safe = name.replace(/[\\\\/:*?"<>|]/g, '_');
+      const fp = dir + '/' + safe;
+      const file = fileIo.openSync(fp, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(file.fd, buf);
+      fileIo.closeSync(file);
+      const uri = fileUri.getUriFromPath(fp);
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        uri: uri,
+        type: mime,
+        flags: wantConstant.Flags.FLAG_AUTH_READ_URI_PERMISSION
+      };
+      await ctx.startAbility(want);
+    } catch (e) {
+      const err = e as BusinessError;
+      // 没有可打开的应用时系统会报错，这里给一句人话提示
+      promptAction.showToast({ message: '无法用系统应用打开：' + (err && err.message ? err.message : '未知原因') });
+    }
+  }
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="";'
+      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="",docDone="";'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1468,6 +1535,63 @@ struct Index {
       // 面板里"正在显示图片"的绝对路径 —— 用于**主动接管图片**。
       // 起因：官方图片查看器能显示成功（没有报错），所以"按报错触发"根本轮不到我，
       // 而官方那个**不能放大**。所以图片改为按"面板出现图片"触发。
+      // ── office / pdf：本查看器不渲染，交给**系统应用**打开 ─────────────
+      // 背景（真机实测）：DSH 的 docx/xlsx/pptx/pdf 渲染器在 ArkWeb 里起不来，
+      //   报的是「预览器 xxx 不可用」——注意这**不是**"文件资源服务不可用"，
+      //   说明**取字节那条路是通的，失败的是渲染器本身**。
+      //   所以"交还官方"对这几类是死路，只能由本 App 转交系统应用打开。
+      + 'function isDoc(p){return /[.](docx?|xlsx?|pptx?|odt|ods|odp|rtf|pdf)$/i.test(String(p||""));}'
+      // 类型判定**不依赖 errTabName()**（实测它会返回空 —— 正是 office 被误当文本铺出来的元凶）。
+      // 改为把能看到的线索全收集起来判一遍：页签标题、路径标签、点击记录。
+      + 'function typeOf(){var c=[];try{'
+      + 'var tb=document.querySelectorAll("[data-dockkit-tab]");'
+      + 'for(var i=0;i<tb.length;i++)c.push((tb[i].innerText||"").trim());}catch(e){}'
+      + 'try{var l=document.querySelectorAll("[data-path-label]");'
+      + 'for(var j=0;j<l.length;j++)c.push((l[j].innerText||"").trim());}catch(e){}'
+      + 'if(lastPath)c.push(lastPath);if(lastUsed)c.push(lastUsed);'
+      + 'for(var k=0;k<c.length;k++){var s=c[k];if(!s)continue;'
+      + 'if(isDoc(s))return s;}return null;}'
+      // office/pdf 的占位页：文件名 + 类型 + 「用系统应用打开」
+      + 'function renderOpenWith(path){'
+      + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
+      + 'var dk=dark();'
+      + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
+      + 'sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5",ac=dk?"#4c8dff":"#2f6fed";'
+      + 'var abs=absOf(path)||path;var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
+      + 'var w=document.createElement("div");w.id="dsh-filefix";'
+      + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
+      + 'var bar=document.createElement("div");'
+      + 'bar.style.cssText="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid "+bd+";flex:0 0 auto;flex-wrap:wrap;";'
+      + 'var pth=document.createElement("div");pth.textContent=abs;'
+      + 'pth.style.cssText="flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:"+sub+";";'
+      + 'var cb=document.createElement("button");cb.textContent="关闭";'
+      + 'cb.style.cssText="border:1px solid "+bd+";background:"+bt+";color:"+fg+";border-radius:7px;padding:5px 10px;font-size:12.5px;";'
+      + 'cb.onclick=close;bar.appendChild(pth);bar.appendChild(cb);'
+      + 'var body=document.createElement("div");'
+      + 'body.style.cssText="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;";'
+      + 'var ic=document.createElement("div");ic.textContent=ext;'
+      + 'ic.style.cssText="width:96px;height:96px;border-radius:14px;border:2px solid "+ac+";color:"+ac+";display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;";'
+      + 'var t1=document.createElement("div");t1.textContent=nm;t1.style.cssText="font-size:15px;font-weight:600;word-break:break-all;max-width:80%;";'
+      + 'var t2=document.createElement("div");t2.textContent="这种格式本查看器不渲染，交给手机上的应用打开";'
+      + 't2.style.cssText="font-size:12.5px;color:"+sub+";max-width:80%;line-height:1.6;";'
+      + 'var ob=document.createElement("button");ob.textContent="用系统应用打开";'
+      + 'ob.style.cssText="border:none;background:"+ac+";color:#fff;border-radius:10px;padding:12px 26px;font-size:15px;font-weight:600;";'
+      + 'function mimeOf(n){var e=(String(n).split(".").pop()||"").toLowerCase();'
+      + 'var m={doc:"application/msword",docx:"application/vnd.openxmlformats-officedocument.wordprocessingml.document",'
+      + 'xls:"application/vnd.ms-excel",xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",'
+      + 'ppt:"application/vnd.ms-powerpoint",pptx:"application/vnd.openxmlformats-officedocument.presentationml.presentation",'
+      + 'pdf:"application/pdf",odt:"application/vnd.oasis.opendocument.text",'
+      + 'ods:"application/vnd.oasis.opendocument.spreadsheet",odp:"application/vnd.oasis.opendocument.presentation",'
+      + 'rtf:"application/rtf"};return m[e]||"application/octet-stream";}'
+      + 'ob.onclick=function(){ob.textContent="正在准备…";ob.disabled=true;'
+      // 把"完整下载地址 + 文件名 + MIME"交给原生：原生就不必猜基址，也不用搬 base64
+      + 'try{window.dshShell.openFile(JSON.stringify({'
+      + 'url:location.origin+"/api/file?path="+encodeURIComponent(abs),'
+      + 'name:nm,mime:mimeOf(nm)}));}catch(e){}'
+      + 'setTimeout(function(){ob.textContent="用系统应用打开";ob.disabled=false;},2500);};'
+      + 'body.appendChild(ic);body.appendChild(t1);body.appendChild(t2);body.appendChild(ob);'
+      + 'w.appendChild(bar);w.appendChild(body);document.body.appendChild(w);'
+      + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
       // ★只认**右侧栏里**的图片 —— 聊天里内联的图片（消息缩略图）绝不能触发。
       // 【踩过的坑】第一版优先匹配 src 含 /api/file?path= 的 <img>，
       //   而**聊天内联图正是这种 src**，真正的预览反而是 blob:
@@ -1497,6 +1621,8 @@ struct Index {
       + '}}}catch(e){}return null;}'
       // 关掉"官方那个图片预览页签" —— 从页签内容容器拿到 tabN，再点它的关闭按钮。
       // 这样只留本查看器一层（用户反馈：原来官方一层 + 我这一层，关掉我的官方还在）。
+      // 关掉官方那个"预览器不可用"的页签（office/pdf 接管后调用），避免"关了我的官方还在"
+      + 'function closeOfficialTab(){try{return closeErrTab();}catch(e){return false;}}'
       + 'function closePane(pane){try{var n=pane,d=0;'
       + 'while(n&&n!==document&&d<6){d++;'
       + 'if(n.getAttribute){var id=n.getAttribute("data-dockkit-content");'
@@ -1807,6 +1933,11 @@ struct Index {
       + 'if(shown)return;'
       // ★图片主动接管：官方图片查看器不能放大，所以图片一律由本查看器渲染（带缩放）。
       //   注意用 imgDone 去重，否则用户关掉浮层后会立刻又被弹出来。
+      // office/pdf：先判类型（不看报错态）→ 占位页 + 交系统应用
+      + 'var dch=typeOf();'
+      + 'if(dch&&!isImg(dch)){var dk2=base(dch);'
+      + 'if(dk2!==docDone){docDone=dk2;lastUsed=dch;renderOpenWith(dch);closeOfficialTab();'
+      + 'setTimeout(closeOfficialTab,350);}return;}'
       // 兜底：文档期拦下的路径（事件可能因时序没接住）
       + 'if(window.__dshImgWant){var _w=window.__dshImgWant;window.__dshImgWant=null;wantImg(_w);return;}'
       + 'var ir=activeImagePath();'
@@ -1990,6 +2121,10 @@ struct Index {
       },
       log: (m: string): void => {
         this.addLog(m);
+      },
+      // 下载并用系统应用打开（office/pdf）。json = {url, name, mime}
+      openFile: (json: string): void => {
+        this.openWithSystem(json);
       },
       openSites: (): void => {
         this.backToPicker();
@@ -3211,7 +3346,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'openFile', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
