@@ -3192,13 +3192,18 @@ struct Index {
         // 文档**开始**时就把 localStorage 快照写进去 —— DSH 一加载就读 dsh.*，
         // 等 onPageEnd 再注入就太晚了。脚本内容由 lsSeedJs 提供（每次导航前刷新）。
         .javaScriptOnDocumentStart([{ script: this.lsSeedJs, scriptRules: ['*'] }])
-        // 声明系统软键盘的回车键类型为「发送」。
-        // 小艺输入法的「长按发送键换行」依赖这个声明：不声明时点按与长按发出的事件相同，
-        // 网页无从区分（用户实测两者都是发送）；声明为发送键后，长按即由输入法转换为换行。
+        // 声明系统软键盘的回车键类型为「换行」(NEWLINE)。
+        // ★这里踩过两次：
+        //   ① 不声明（UNSPECIFIED）→ 输入框上一直显示"发送"，小艺的长按换行无效。
+        //   ② 声明成 SEND → 强制显示"发送"、行为固定为发送，长按换行**依然无效**。
+        // 用户实测对照：微信/QQ 里"小艺长按发送键换行"关闭时**显示换行**、开启时**显示发送且长按换行**
+        //   —— 说明应用应当声明"换行"，由输入法按它自己的开关去升级成"发送+长按换行"。
+        // 所以这里声明 NEWLINE：关闭该功能时就是普通的换行键（能换行），
+        // 开启后由输入法升级为发送键并支持长按换行。
         .onInterceptKeyboardAttach((info: WebKeyboardCallbackInfo) => {
           const opts: WebKeyboardOptions = {
             useSystemKeyboard: true,
-            enterKeyType: inputMethod.EnterKeyType.SEND
+            enterKeyType: inputMethod.EnterKeyType.NEWLINE
           };
           return opts;
         })
