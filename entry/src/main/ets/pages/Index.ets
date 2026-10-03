@@ -32,6 +32,26 @@ const BUILD_TAG: string = '构建 v10-01-3712'
 // 跨地址同步的 localStorage 快照（键名带 dsh. 前缀的那些）
 const KEY_LS_SNAPSHOT: string = 'ls_sync';
 
+// ── 回车键 = 换行 ────────────────────────────────────────────────
+// 背景：DSH 的网页输入框把回车一律当"发送"，而且**没有**"回车发送/换行"的设置项
+//   （ui-conversation 的 busyEnter 只管"忙碌时排队还是插话"，不是这个）。
+// 鸿蒙侧我们已用 onInterceptKeyboardAttach 把系统软键盘的回车键声明为「换行」，
+//   用户实测：**按键标签确实变成了"换行"**，但点下去仍然发送 ——
+//   因为输入法发出来的仍是一个普通回车，DSH 的处理器照旧发送。
+// 所以最后一步必须由我们拦住：在 **文档开始**（抢在 DSH 脚本之前）用 window 捕获阶段
+//   注册 keydown，拦下不带修饰键的回车并 stopImmediatePropagation，
+//   **不 preventDefault** —— 让 contenteditable 的默认行为插入换行。
+// 发送改用界面上的发送按钮（蓝色圆形）。
+// 注：带 Shift/Ctrl/Alt/Meta 的回车不拦（原本就不发送，走原生换行即可）。
+const ENTER_AS_NEWLINE_JS: string = '(function(){try{'
+  + 'window.addEventListener("keydown",function(e){try{'
+  + 'if(e.key!=="Enter"&&e.keyCode!==13)return;'
+  + 'var t=e.target;if(!(t&&t.closest))return;'
+  + 'if(!t.closest("[contenteditable=\\"true\\"],[contenteditable=\\"\\"],textarea"))return;'
+  + 'if(e.shiftKey||e.ctrlKey||e.metaKey||e.altKey)return;'
+  + 'e.stopImmediatePropagation();'
+  + '}catch(x){}},true);}catch(e){}})()';
+
 const DAV_DIR: string = '/DSH/Dsh_zhandian';
 const DAV_FILE: string = '/dsh-sites.json';
 const KEY_DAV_URL: string = 'dav_url';
@@ -3191,7 +3211,12 @@ struct Index {
         .domStorageAccess(true)
         // 文档**开始**时就把 localStorage 快照写进去 —— DSH 一加载就读 dsh.*，
         // 等 onPageEnd 再注入就太晚了。脚本内容由 lsSeedJs 提供（每次导航前刷新）。
-        .javaScriptOnDocumentStart([{ script: this.lsSeedJs, scriptRules: ['*'] }])
+        .javaScriptOnDocumentStart([
+          // ① 把 dsh.* 快照写进当前 origin（跨地址同步设置）
+          { script: this.lsSeedJs, scriptRules: ['*'] },
+          // ② 回车=换行（必须在文档开始注册，才能抢在 DSH 的处理器之前）
+          { script: ENTER_AS_NEWLINE_JS, scriptRules: ['*'] }
+        ])
         // 声明系统软键盘的回车键类型为「换行」(NEWLINE)。
         // ★这里踩过两次：
         //   ① 不声明（UNSPECIFIED）→ 输入框上一直显示"发送"，小艺的长按换行无效。
