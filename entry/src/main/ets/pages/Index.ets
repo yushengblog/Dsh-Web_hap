@@ -12,6 +12,9 @@ import { rcp } from '@kit.RemoteCommunicationKit';
 
 const DOMAIN: number = 0x0000;
 
+// 大文件提醒阈值（MB），0 = 不提醒
+const KEY_OPEN_THRESHOLD: string = 'open_threshold';
+
 // 阶段：0 = 选站点，1 = 连接中，2 = 显示网页
 const PHASE_PICKER: number = 0;
 const PHASE_LOADING: number = 1;
@@ -116,6 +119,8 @@ interface ShellBridge {
   getSafeBottom: () => number;
   log: (m: string) => void;
   openSites: () => void;
+  // 打开「打开方式」面板（缓存占用 / 清空 / 阈值）
+  openWithPanel: () => void;
   // 下载并用系统应用打开（office/pdf）
   openFile: (json: string) => void;
   setOverlay: (v: number) => void;
@@ -201,6 +206,19 @@ struct Index {
   @State webConsoleErr: string = '';
   // 自建文件查看器是否开着
   @State fileFixOpen: boolean = false;
+  // 大文件提醒阈值（MB），0 = 不提醒
+  @State threshold: number = 200;
+  // 阈值输入弹窗（用 ArkUI 的 CustomDialog，才能接受**任意输入**，不是只能从预设里挑）
+  thDlg: CustomDialogController = new CustomDialogController({
+    builder: ThresholdDialog({
+      cur: this.threshold,
+      onSave: (v: number): void => {
+        this.setThreshold(v);
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center
+  });
   // 从安装包读出的版本号（形如 v1.0.12 (1000012)）——用于让用户核对装的是哪一版
   @State verText: string = BUILD_TAG;
   // 网页增强总开关：置 false 可完全停掉所有注入，用来判断"是不是我的注入引起的"
@@ -1393,27 +1411,120 @@ struct Index {
   //   在 ArkWeb 里起不来（报「预览器 xxx 不可用」，注意**不是**"文件资源服务不可用"），
   //   所以"交还官方"对这几类是死路。
   // 下载用 http + WebView 的 Cookie（同源，带凭据），避免把文件搬成 base64 过大。
-  // 清理"交给系统应用打开"用的缓存目录，避免越攒越大。
-  // 策略：**保留最近 1 小时内动过的**（那个可能正被外部应用阅读，删了会让对方打不开），
-  //       其余一律删除。每次打开新文件前调用 —— 这样目录里长期只有最近几个文件。
-  // 备注：放在 cacheDir（应用私有缓存），系统在存储紧张时也会回收。
-  cleanOpenWithDir(dir: string): void {
+  // ── 交系统应用打开：缓存管理 + 大文件提醒阈值 ────────────────────
+  // 设计（用户定稿）：
+  //   · 缓存**不自动清理**，一直保留到用户手动清
+  //   · 只做"全部清理"，不列单个文件（文件本来就在电脑上有）
+  //   · 下载前若体积超过阈值先问一声；阈值**用户可任意输入**，0 = 不提醒
+  // 「打开方式」面板：缓存占用 / 清空缓存 / 大文件提醒阈值（用户定稿的形态）
+  async showOpenWithPanel(): Promise<void> {
+    const u = this.cacheUsage().split('|');
+    const sizeTxt = this.fmtSize(Number.parseInt(u[0], 10));
+    const cnt = u[1];
+    const th = this.getThreshold();
     try {
+      const r = await promptAction.showActionMenu({
+        title: '打开方式',
+        buttons: [
+          { text: '缓存占用：' + sizeTxt + '（' + cnt + ' 个文件）', color: '#888888' },
+          { text: '清空缓存', color: '#d94848' },
+          { text: '大文件提醒阈值：' + (th === 0 ? '不提醒' : th + ' MB'), color: '#2f6fed' }
+        ]
+      });
+      if (r.index === 1) {
+        const ok = await promptAction.showDialog({
+          title: '清空缓存',
+          message: '将删除"用系统应用打开"留下的全部缓存文件（' + sizeTxt + '，' + cnt + ' 个）。文件本来就在电脑上，删了不影响。',
+          buttons: [
+            { text: '取消', color: '#666666' },
+            { text: '清空', color: '#d94848' }
+          ]
+        });
+        if (ok.index === 1) {
+          this.clearOpenWithCache();
+          promptAction.showToast({ message: '已清空' });
+        }
+      } else if (r.index === 2) {
+        this.thDlg.open();
+      }
+    } catch (e) {
+    }
+  }
+  openWithDir(): string {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    return ctx.cacheDir + '/openwith';
+  }
+
+  // 返回 "字节数|文件数"
+  cacheUsage(): string {
+    let bytes = 0;
+    let count = 0;
+    try {
+      const dir = this.openWithDir();
       const names = fileIo.listFileSync(dir);
-      const now = Date.now();
       for (let i = 0; i < names.length; i++) {
         try {
-          const full = dir + '/' + names[i];
-          const st = fileIo.statSync(full);
-          // HarmonyOS 的 stat.mtime 单位是**秒**
-          if (now - st.mtime * 1000 > 3600000) {
-            fileIo.unlinkSync(full);
-          }
+          const st = fileIo.statSync(dir + '/' + names[i]);
+          bytes += st.size;
+          count++;
         } catch (e) {
         }
       }
     } catch (e) {
     }
+    return bytes + '|' + count;
+  }
+
+  clearOpenWithCache(): void {
+    try {
+      const dir = this.openWithDir();
+      const names = fileIo.listFileSync(dir);
+      for (let i = 0; i < names.length; i++) {
+        try {
+          fileIo.unlinkSync(dir + '/' + names[i]);
+        } catch (e) {
+        }
+      }
+    } catch (e) {
+    }
+  }
+
+  getThreshold(): number {
+    try {
+      if (this.store !== null) {
+        const v = this.store.getSync(KEY_OPEN_THRESHOLD, 200) as number;
+        if (v >= 0) {
+          return v;
+        }
+      }
+    } catch (e) {
+    }
+    return 200;
+  }
+
+  setThreshold(n: number): void {
+    try {
+      if (this.store !== null) {
+        this.store.putSync(KEY_OPEN_THRESHOLD, n < 0 ? 0 : n);
+        this.store.flush();
+        this.threshold = n < 0 ? 0 : n;
+      }
+    } catch (e) {
+    }
+  }
+
+  // 人类可读的体积
+  fmtSize(b: number): string {
+    if (b >= 1073741824) {
+      return (b / 1073741824).toFixed(2) + ' GB';
+    }
+    if (b >= 1048576) {
+      return (b / 1048576).toFixed(1) + ' MB';
+    }
+    if (b >= 1024) {
+      return (b / 1024).toFixed(0) + ' KB';
+    }
+    return b + ' B';
   }
   async openWithSystem(json: string): Promise<void> {
     let url = '';
@@ -1445,6 +1556,34 @@ struct Index {
         readTimeout: 120000
       });
       req.destroy();
+      // 下载前先看体积：超过阈值就问一声（阈值可在「打开方式」里任意改，0 = 不提醒）
+      let size = 0;
+      try {
+        // ArkTS 不允许隐式 any：这里显式声明类型再取值
+        const hdrs: Record<string, string> = resp.header as Record<string, string>;
+        const cl: string = hdrs['content-length'];
+        if (cl !== undefined && cl !== null && cl.length > 0) {
+          size = Number.parseInt(cl, 10);
+          if (Number.isNaN(size)) {
+            size = 0;
+          }
+        }
+      } catch (e) {
+      }
+      const th = this.getThreshold();
+      if (th > 0 && size > th * 1048576) {
+        const ask = await promptAction.showDialog({
+          title: '这个文件比较大',
+          message: '大小约 ' + this.fmtSize(size) + '，超过你设的提醒阈值 ' + th + ' MB。确定要下载到手机缓存吗？',
+          buttons: [
+            { text: '取消', color: '#666666' },
+            { text: '下载', color: '#2f6fed' }
+          ]
+        });
+        if (ask.index !== 1) {
+          return;
+        }
+      }
       if (resp.responseCode !== 200) {
         promptAction.showToast({ message: '下载失败（HTTP ' + resp.responseCode + '）' });
         return;
@@ -1456,8 +1595,6 @@ struct Index {
         fileIo.mkdirSync(dir);
       } catch (e) {
       }
-      // 先清理旧文件再写新的（见 cleanOpenWithDir 注释）
-      this.cleanOpenWithDir(dir);
       const safe = name.replace(/[\\\\/:*?"<>|]/g, '_');
       const fp = dir + '/' + safe;
       const file = fileIo.openSync(fp, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
@@ -1998,7 +2135,7 @@ struct Index {
     //    避免多个 setInterval 同时做全 DOM 查询把手机主线程拖死。
 
     // ② 在 DSH 设置弹窗里、Agent 预设右侧插入「站点」选项卡
-    this.js('(function(){if(window.__dshSites){return;}window.__dshSites=1;setInterval(function(){try{var d=document.querySelector("[role=dialog]");if(!d){return;}if(d.querySelector("[data-dsh-sites]")){return;}var bs=d.querySelectorAll("button,[role=tab]");var a=null;for(var i=0;i<bs.length;i++){var x=(bs[i].textContent||"").trim();if(x.indexOf("Agent")===0){a=bs[i];break;}}if(!a||!a.parentElement){return;}var b=document.createElement("button");b.type="button";b.setAttribute("data-dsh-sites","1");b.textContent="\u7ad9\u70b9";b.className=a.className;b.style.marginLeft="4px";b.onclick=function(e){e.stopPropagation();window.dshShell.openSites();};a.parentElement.insertBefore(b,a.nextSibling);}catch(e){}},1200);})()');
+    this.js('(function(){if(window.__dshSites){return;}window.__dshSites=1;setInterval(function(){try{var d=document.querySelector("[role=dialog]");if(!d){return;}if(d.querySelector("[data-dsh-sites]")||d.querySelector("[data-dsh-ow]")){return;}var bs=d.querySelectorAll("button,[role=tab]");var a=null;for(var i=0;i<bs.length;i++){var x=(bs[i].textContent||"").trim();if(x.indexOf("Agent")===0){a=bs[i];break;}}if(!a||!a.parentElement){return;}var b=document.createElement("button");b.type="button";b.setAttribute("data-dsh-sites","1");b.textContent="\u7ad9\u70b9";b.className=a.className;b.style.marginLeft="4px";b.onclick=function(e){e.stopPropagation();window.dshShell.openSites();};a.parentElement.insertBefore(b,a.nextSibling);var b2=document.createElement("button");b2.type="button";b2.setAttribute("data-dsh-ow","1");b2.textContent="\u6253\u5f00\u65b9\u5f0f";b2.className=a.className;b2.style.marginLeft="4px";b2.onclick=function(e){e.stopPropagation();window.dshShell.openWithPanel();};b.parentElement.insertBefore(b2,b);}catch(e){}},1200);})()');
     // ③ 自动登录：按当前站点的账号密码填表并提交
     this.js('(function(){if(window.__dshLogin){return;}window.__dshLogin=1;function sv(el,v){try{var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value");if(d&&d.set){d.set.call(el,v);}else{el.value=v;}el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));}catch(e){}}function go(){try{var c=JSON.parse(window.dshShell.getCurrent()||"{}");var g=JSON.parse(window.dshShell.getGroups()||"[]");var a=(g[c.g]&&g[c.g].items)?g[c.g].items[c.i]:null;if(!a||!a.user||!a.pass){return;}var p=document.querySelector("input[type=password]");if(!p){return;}var sc=p.form||document;var ins=sc.querySelectorAll("input");var u=null;for(var i=0;i<ins.length;i++){var t=(ins[i].type||"text").toLowerCase();if(t==="text"||t==="email"||t==="tel"){u=ins[i];break;}}if(u&&!u.value){sv(u,a.user);}if(!p.value){sv(p,a.pass);}var b=sc.querySelector("button[type=submit],input[type=submit]");if(b){b.click();}else if(p.form){p.form.requestSubmit();}}catch(e){}}setTimeout(go,1500);setTimeout(go,3500);})()');
     // ④ 自动点掉首次引导弹窗（"继续"/"我知道了"/"开始使用"）
@@ -2147,6 +2284,9 @@ struct Index {
         this.addLog(m);
       },
       // 下载并用系统应用打开（office/pdf）。json = {url, name, mime}
+      openWithPanel: (): void => {
+        this.showOpenWithPanel();
+      },
       openFile: (json: string): void => {
         this.openWithSystem(json);
       },
@@ -3370,7 +3510,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'openFile', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'openFile', 'openWithPanel', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
@@ -3585,5 +3725,57 @@ struct Index {
         this.winW = w;
       }
     })
+  }
+}
+
+// ── 大文件提醒阈值输入弹窗 ────────────────────────────────────────
+// 为什么用 CustomDialog 而不是 promptAction：promptAction 只能给固定按钮，
+// 而用户要求阈值**想输多少就输多少**，必须能自由输入 → 需要 TextInput。
+@CustomDialog
+struct ThresholdDialog {
+  controller: CustomDialogController;
+  cur: number = 200;
+  onSave: (v: number) => void = () => {
+  };
+  @State text: string = '200';
+
+  aboutToAppear(): void {
+    this.text = String(this.cur);
+  }
+
+  build() {
+    Column({ space: 14 }) {
+      Text('大文件提醒阈值').fontSize(17).fontWeight(FontWeight.Bold)
+      Text('下载超过这个大小（MB）的文件前会先问一声；填 0 表示不提醒。')
+        .fontSize(12.5).fontColor('#8a8a8a').lineHeight(19)
+      TextInput({ text: this.text })
+        .type(InputType.Number)
+        .height(44)
+        .onChange((v: string) => {
+          this.text = v;
+        })
+      Row({ space: 12 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .backgroundColor('#00000000')
+          .fontColor('#8a8a8a')
+          .onClick(() => {
+            this.controller.close();
+          })
+        Button('保存')
+          .layoutWeight(1)
+          .onClick(() => {
+            let n = Number.parseInt(this.text, 10);
+            if (Number.isNaN(n) || n < 0) {
+              n = 0;
+            }
+            this.onSave(n);
+            this.controller.close();
+          })
+      }.width('100%')
+    }
+    .padding(22)
+    .backgroundColor(Color.White)
+    .borderRadius(16)
   }
 }
