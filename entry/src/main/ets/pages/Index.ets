@@ -1,4 +1,4 @@
-import { webview } from '@kit.ArkWeb';
+﻿import { webview } from '@kit.ArkWeb';
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager, wantConstant, Want } from '@kit.AbilityKit';
@@ -1393,6 +1393,28 @@ struct Index {
   //   在 ArkWeb 里起不来（报「预览器 xxx 不可用」，注意**不是**"文件资源服务不可用"），
   //   所以"交还官方"对这几类是死路。
   // 下载用 http + WebView 的 Cookie（同源，带凭据），避免把文件搬成 base64 过大。
+  // 清理"交给系统应用打开"用的缓存目录，避免越攒越大。
+  // 策略：**保留最近 1 小时内动过的**（那个可能正被外部应用阅读，删了会让对方打不开），
+  //       其余一律删除。每次打开新文件前调用 —— 这样目录里长期只有最近几个文件。
+  // 备注：放在 cacheDir（应用私有缓存），系统在存储紧张时也会回收。
+  cleanOpenWithDir(dir: string): void {
+    try {
+      const names = fileIo.listFileSync(dir);
+      const now = Date.now();
+      for (let i = 0; i < names.length; i++) {
+        try {
+          const full = dir + '/' + names[i];
+          const st = fileIo.statSync(full);
+          // HarmonyOS 的 stat.mtime 单位是**秒**
+          if (now - st.mtime * 1000 > 3600000) {
+            fileIo.unlinkSync(full);
+          }
+        } catch (e) {
+        }
+      }
+    } catch (e) {
+    }
+  }
   async openWithSystem(json: string): Promise<void> {
     let url = '';
     let name = 'file';
@@ -1434,6 +1456,8 @@ struct Index {
         fileIo.mkdirSync(dir);
       } catch (e) {
       }
+      // 先清理旧文件再写新的（见 cleanOpenWithDir 注释）
+      this.cleanOpenWithDir(dir);
       const safe = name.replace(/[\\\\/:*?"<>|]/g, '_');
       const fp = dir + '/' + safe;
       const file = fileIo.openSync(fp, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
