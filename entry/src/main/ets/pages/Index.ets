@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager, wantConstant, Want } from '@kit.AbilityKit';
@@ -122,7 +122,10 @@ interface ShellBridge {
   // 打开「打开方式」面板（缓存占用 / 清空 / 阈值）
   openWithPanel: () => void;
   // 下载并用系统应用打开（office/pdf）
-  openFile: (json: string) => void;
+  openFileBegin: (json: string) => void;
+  openFileChunk: (b64: string) => void;
+  openFileEnd: (mime: string) => void;
+  getThreshold: () => string;
   setOverlay: (v: number) => void;
   // 自建文件查看器的开合状态（返回键/侧滑据此先关它）
   setFileFix: (v: number) => void;
@@ -1526,6 +1529,69 @@ struct Index {
     }
     return b + ' B';
   }
+  // ── 交系统应用打开：网页下载 → 分块落盘 → startAbility ──────────────
+  // 为什么不让原生下载：实测原生 http 请求 /api/file 拿到 **HTTP 400**
+  //   （很可能是中间那层反代对非浏览器请求不友好）。
+  //   而**网页自己 fetch 同源 /api/file 是通的**（图片就是这么拿到的，已验证），
+  //   所以改为网页下载 → 按 2MB 分块 base64 交给原生 → 原生写盘 → 打开。
+  //   分块是为了不把几十 MB 的字符串一次性塞过 JS 桥。
+  owFd: number = -1;
+  owPath: string = '';
+
+  openFileBegin(json: string): void {
+    try {
+      const o = JSON.parse(json) as Record<string, string>;
+      const name = o.name || 'file';
+      const dir = this.openWithDir();
+      try {
+        fileIo.mkdirSync(dir);
+      } catch (e) {
+      }
+      const safe = name.replace(/[\\/:*?"<>|]/g, '_');
+      this.owPath = dir + '/' + safe;
+      this.owFd = fileIo.openSync(this.owPath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC).fd;
+    } catch (e) {
+      this.owFd = -1;
+    }
+  }
+
+  openFileChunk(b64: string): void {
+    if (this.owFd < 0) {
+      return;
+    }
+    try {
+      const helper = new util.Base64Helper();
+      const bytes: Uint8Array = helper.decodeSync(b64);
+      fileIo.writeSync(this.owFd, bytes.buffer as ArrayBuffer);
+    } catch (e) {
+    }
+  }
+
+  async openFileEnd(mime: string): Promise<void> {
+    if (this.owFd < 0) {
+      return;
+    }
+    try {
+      fileIo.closeSync(this.owFd);
+    } catch (e) {
+    }
+    this.owFd = -1;
+    try {
+      const uri = fileUri.getUriFromPath(this.owPath);
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        uri: uri,
+        type: mime,
+        flags: wantConstant.Flags.FLAG_AUTH_READ_URI_PERMISSION
+      };
+      const ctx = getContext(this) as common.UIAbilityContext;
+      await ctx.startAbility(want);
+    } catch (e) {
+      const err = e as BusinessError;
+      promptAction.showToast({ message: '无法用系统应用打开：' + (err && err.message ? err.message : '未知原因') });
+    }
+  }
   async openWithSystem(json: string): Promise<void> {
     let url = '';
     let name = 'file';
@@ -1744,12 +1810,40 @@ struct Index {
       + 'pdf:"application/pdf",odt:"application/vnd.oasis.opendocument.text",'
       + 'ods:"application/vnd.oasis.opendocument.spreadsheet",odp:"application/vnd.oasis.opendocument.presentation",'
       + 'rtf:"application/rtf"};return m[e]||"application/octet-stream";}'
-      + 'ob.onclick=function(){ob.textContent="正在准备…";ob.disabled=true;'
-      // 把"完整下载地址 + 文件名 + MIME"交给原生：原生就不必猜基址，也不用搬 base64
-      + 'try{window.dshShell.openFile(JSON.stringify({'
-      + 'url:location.origin+"/api/file?path="+encodeURIComponent(abs),'
-      + 'name:nm,mime:mimeOf(nm)}));}catch(e){}'
-      + 'setTimeout(function(){ob.textContent="用系统应用打开";ob.disabled=false;},2500);};'
+      + 'function b64of(blob){return new Promise(function(res,rej){var fr=new FileReader();'
+      + 'fr.onload=function(){var s=String(fr.result);res(s.substring(s.indexOf(",")+1));};'
+      + 'fr.onerror=rej;fr.readAsDataURL(blob);});}'
+      + 'function askBig(msg){return new Promise(function(res){'
+      + 'var m=document.createElement("div");'
+      + 'm.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:24px;";'
+      + 'var c=document.createElement("div");'
+      + 'c.style.cssText="background:"+(dark()?"#1f1f22":"#fff")+";color:"+(dark()?"#e6e6e9":"#1f1f1f")+";border-radius:14px;padding:18px;max-width:340px;font-size:14px;line-height:1.6;";'
+      + 'c.textContent=msg;'
+      + 'var r=document.createElement("div");r.style.cssText="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;";'
+      + 'function mk(t,v){var b=document.createElement("button");b.textContent=t;'
+      + 'b.style.cssText="border:none;border-radius:8px;padding:8px 16px;font-size:14px;background:"+(v?"#2f6fed":"rgba(0,0,0,0)")+";color:"+(v?"#fff":(dark()?"#aaa":"#666"))+";";'
+      + 'b.onclick=function(){document.body.removeChild(m);res(v);};return b;}'
+      + 'r.appendChild(mk("取消",0));r.appendChild(mk("下载",1));c.appendChild(r);m.appendChild(c);'
+      + 'document.body.appendChild(m);});}'
+      + 'ob.onclick=async function(){ob.textContent="正在下载…";ob.disabled=true;'
+      + 'try{'
+      + 'var url=location.origin+"/api/file?path="+encodeURIComponent(abs);'
+      + 'var r=await fetch(url,{credentials:"include"});'
+      + 'if(!r.ok){ob.textContent="下载失败（HTTP "+r.status+"）";ob.disabled=false;return;}'
+      + 'var len=Number(r.headers.get("content-length")||0);'
+      + 'var th=Number(window.dshShell.getThreshold()||"200");'
+      + 'if(th>0&&len>th*1048576){'
+      + 'var go=await askBig("这个文件约 "+(len/1048576).toFixed(1)+" MB，超过你设的提醒阈值 "+th+" MB。确定要下载到手机缓存吗？");'
+      + 'if(!go){ob.textContent="用系统应用打开";ob.disabled=false;return;}}'
+      + 'var blob=await r.blob();'
+      + 'window.dshShell.openFileBegin(JSON.stringify({name:nm,mime:mimeOf(nm)}));'
+      + 'var CH=2*1024*1024,off=0;'
+      + 'while(off<blob.size){var part=blob.slice(off,Math.min(off+CH,blob.size));'
+      + 'window.dshShell.openFileChunk(await b64of(part));off+=CH;}'
+      + 'window.dshShell.openFileEnd(mimeOf(nm));'
+      + 'ob.textContent="已交给系统打开";'
+      + 'setTimeout(function(){ob.textContent="用系统应用打开";ob.disabled=false;},2000);'
+      + '}catch(e){ob.textContent="出错："+(e&&e.message?e.message:e);ob.disabled=false;}};'
       + 'body.appendChild(ic);body.appendChild(t1);body.appendChild(t2);body.appendChild(ob);'
       + 'w.appendChild(bar);w.appendChild(body);document.body.appendChild(w);'
       + 'if(!shown){shown=true;try{window.dshShell.setFileFix(1);}catch(e){}}}'
@@ -2287,8 +2381,17 @@ struct Index {
       openWithPanel: (): void => {
         this.showOpenWithPanel();
       },
-      openFile: (json: string): void => {
-        this.openWithSystem(json);
+      openFileBegin: (json: string): void => {
+        this.openFileBegin(json);
+      },
+      openFileChunk: (b64: string): void => {
+        this.openFileChunk(b64);
+      },
+      openFileEnd: (mime: string): void => {
+        this.openFileEnd(mime);
+      },
+      getThreshold: (): string => {
+        return String(this.getThreshold());
       },
       openSites: (): void => {
         this.backToPicker();
@@ -3510,7 +3613,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'openFile', 'openWithPanel', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'openFileBegin', 'openFileChunk', 'openFileEnd', 'getThreshold', 'openWithPanel', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
