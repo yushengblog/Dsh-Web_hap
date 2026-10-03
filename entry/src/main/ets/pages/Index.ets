@@ -27,7 +27,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v1.1.20'
+const BUILD_TAG: string = '构建 v1.1.21'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1800,18 +1800,28 @@ struct Index {
       + 'function isDoc(p){return /[.](docx?|xlsx?|pptx?|odt|ods|odp|rtf|pdf)$/i.test(String(p||""));}'
       // 类型判定**不依赖 errTabName()**（实测它会返回空 —— 正是 office 被误当文本铺出来的元凶）。
       // 改为把能看到的线索全收集起来判一遍：页签标题、路径标签、点击记录。
-      + 'function typeOf(){var c=[];try{'
-      + 'var tb=document.querySelectorAll("[data-dockkit-tab]");'
-      + 'for(var i=0;i<tb.length;i++)c.push((tb[i].innerText||"").trim());}catch(e){}'
+      // ★★v1.1.21：判据改成**只用"现场"线索**，彻底不再用 lastPath/lastUsed 这类历史值。
+      //   真机 A/B 实测（v1.1.19 vs v1.1.20 十项试验完全一致）证明：只要历史上开过一次 office，
+      //   历史值就会永远命中 → tick 每 400ms 都提前 return →
+      //   **对话里任何文件都打不开，只有走独立事件通道的图片还能用**（正是用户报的现象）。
+      + 'function liveCandidates(){var out=[],seen={};'
+      + 'function push(p){if(!p)return;p=String(p).trim();if(!p||seen[p])return;seen[p]=1;out.push(p);}'
+      + 'try{var tb=document.querySelectorAll("[data-dockkit-tab]");'
+      + 'for(var i=0;i<tb.length;i++){var nm=(tb[i].innerText||"").trim();if(nm)push(nm);}}catch(e){}'
       + 'try{var l=document.querySelectorAll("[data-path-label]");'
-      + 'for(var j=0;j<l.length;j++)c.push((l[j].innerText||"").trim());}catch(e){}'
-      + 'if(lastPath)c.push(lastPath);if(lastUsed)c.push(lastUsed);'
-      // ★v1.1.20：优先返回**绝对路径**的候选。
-      //   原来按顺序 return 第一个 isDoc 的候选，而候选表里第一个常常是
-      //   [data-dockkit-tab] 的页签标题（只有文件名，相对路径）→ 下游拼 URL 直接 400。
-      + 'var first=null;'
+      + 'for(var j=0;j<l.length;j++){var t=(l[j].innerText||"").trim();if(t)push(t);}}catch(e){}'
+      + 'return out;}'
+      + 'function ISABS(p){return /^[a-zA-Z]:[\\\\\\\\/]/.test(String(p||""));}'
+      + 'function typeOf(){'
+      // ① 有"报错页签"时，它才是用户**刚点的那个文件**（errTabName 从"不可用"元素往上爬到页签）。
+      //    它不是 office 就直接返回 null —— 这样遗留的 office 页签再也挡不住文本文件。
+      + 'var et="";try{et=errTabName();}catch(e){}'
+      + 'if(et){if(isDoc(et))return et;return null;}'
+      // ② office 预览用的是另一套"不可用"面板，findErr/errTabName 都取不到，
+      //    所以这里看**现场页签/路径标签**里有没有 office。
+      + 'var c=liveCandidates();var first=null;'
       + 'for(var k=0;k<c.length;k++){var s=c[k];if(!s)continue;'
-      + 'if(isDoc(s)){if(/^[a-zA-Z]:[\\\\\\\\/]/.test(s))return s;if(!first)first=s;}}return first;}'
+      + 'if(isDoc(s)){if(ISABS(s))return s;if(!first)first=s;}}return first;}'
       // office/pdf 的占位页：文件名 + 类型 + 「用系统应用打开」
       + 'function renderOpenWith(path){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
@@ -1820,12 +1830,14 @@ struct Index {
       + 'sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5",ac=dk?"#4c8dff":"#2f6fed";'
       // ⚠️ 必须用**绝对路径**：实测 /api/file?path= 收到相对路径会返回 HTTP 400
       //    （页签标题就是相对的文件名，直接拿来拼 URL 会踩这个坑）
-      + 'var abs=null;'
+      // ★v1.1.21：绝对路径候选必须与"用户点的那个文件"**同名**。
+      //   否则 lastPath 里的旧文件会把新点的文件顶掉（真机复现：点 xlsx 弹出 docx）。
+      + 'var abs=null;var want=base(path);'
       + 'try{var cl=candidates();for(var ci=0;ci<cl.length;ci++){var cs=cl[ci];'
       // ⚠️ 正则要写 [\\/]（反斜杠或斜杠）。原来这里写的是 [\/]，在 JS 里等价于只匹配**正斜杠**，
       //    于是 `D:\deepseek/_doctest/测试.docx` 这种候选被全部丢掉 —— Windows 路径永远匹配不上。
       //    ArkTS 单引号串里 `\\` 只得到 1 个反斜杠，要生成 JS 的 `\\` 必须写 4 个 `\\\\`。
-      + 'if(cs&&/^[a-zA-Z]:[\\\\\\\\/]/.test(cs)&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
+      + 'if(cs&&/^[a-zA-Z]:[\\\\\\\\/]/.test(cs)&&base(cs)===want&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
       + 'if(!abs)abs=absOf(path);if(!abs)abs=path;'
       + 'var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
@@ -1930,7 +1942,9 @@ struct Index {
       //    （它是**有块**的 if，比无块的写法多开一个），所以只需 1 个关 try。
       //    写 2 个会把 function 一起关掉，catch 就悬空了。
       + 'n=n.parentElement;}catch(e){}return false;}'
-      + 'function imgCandidate(){var l=candidates();'
+      // ★v1.1.21：只看**现场**页签/标签。用 candidates() 会把 lastPath/lastUsed 里的
+      //   历史图片也当成候选 → 点文本文件时反而弹出上次看过的图片（真机复现）。
+      + 'function imgCandidate(){var l=liveCandidates();'
       + 'for(var i=0;i<l.length;i++){if(isImg(l[i]))return l[i];}return null;}'
       + 'function dark(){try{var el=document.querySelector("[class*=sidebarCol]")||document.body;'
       + 'var n=el,d=0,c=null;while(n&&n!==document.documentElement&&d<12){d++;'
@@ -2154,10 +2168,13 @@ struct Index {
       + 'for(i=0;i<us.length;i++){var u=us[i].getAttribute("data-textpreview-url")||"";'
       + 'var m=u.match(/\\/session\\/[^\\/]+\\/(.+)$/);'
       + 'if(m){try{push(decodeURIComponent(m[1]));}catch(e2){}}}}catch(e){}'
-      + 'push(lastPath);'
+      // ★v1.1.21：先放**当前页签**（用户刚点的那个文件），历史记录 lastPath 挪到最后兜底。
+      //   原来 lastPath 排在页签标题**前面**，用户点开新文件时会先拿上一次的文件去读 ——
+      //   读成功就把新文件顶掉（真机复现：点 A 显示 B）。
       + 'try{var ts=document.querySelectorAll("[data-dockkit-tab]");'
       + 'for(i=0;i<ts.length;i++){var nm=(ts[i].innerText||"").trim();'
       + 'if(nm&&nm.indexOf(".")>0&&nm.length<80)push(nm);}}catch(e){}'
+      + 'push(lastPath);'
       + 'return out;}'
       // 逐个试读，取第一个成功的
       + 'function tryAll(list,idx,cb){'
