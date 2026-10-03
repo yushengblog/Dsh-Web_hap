@@ -1,4 +1,4 @@
-﻿import { webview } from '@kit.ArkWeb';
+import { webview } from '@kit.ArkWeb';
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common, bundleManager, wantConstant, Want } from '@kit.AbilityKit';
@@ -1698,7 +1698,15 @@ struct Index {
       // 相对路径 → 绝对路径（/api/file 接口要求绝对路径）
       + 'function absOf(p){if(!p)return null;p=String(p).replace(/\\//g,"\\\\");'
       + 'if(/^[a-zA-Z]:\\\\/.test(p))return p;'
-      + 'if(p.charAt(0)==="\\\\")return p;'
+      + 'if(p.charAt(0)==="\\\\\\\\")return p;'
+      // ⚠️ 相对路径的关键补救（真机实测踩到）：
+      //   手机上 [data-path-label] / [data-files-root] 都可能取不到 → absOf 返回 null
+      //   → 拼出 `/api/file?path=测试.docx`（只有文件名）→ DSH 返回 **HTTP 400**。
+      //   而**文件树的每一行带 data-files-path，它就是绝对路径**（电脑上实测形如
+      //   `D:\deepseek/browser-mcp/out/aa1.jpeg`）→ 按文件名反查即可。
+      + 'try{var __rows=document.querySelectorAll("[data-files-entry=file]");'
+      + 'for(var __ri=0;__ri<__rows.length;__ri++){var __fp=__rows[__ri].getAttribute("data-files-path");'
+      + 'if(__fp&&/^[a-zA-Z]:[\\\\\\\\/]/.test(__fp)&&base(__fp)===base(p))return __fp;}}catch(e){}'
       + 'var root=null;'
       + 'try{var r=document.querySelector("[data-files-root]");if(r)root=r.getAttribute("data-files-root");}catch(e){}'
       + 'if(!root){try{var l=document.querySelectorAll("[data-path-label]");'
