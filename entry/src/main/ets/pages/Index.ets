@@ -29,6 +29,9 @@ const BUILD_TAG: string = '构建 v10-01-3712'
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
 // 主文件 dsh-sites.json 固定名（方便手动下载），同时留一份带时间戳的历史副本。
+// 跨地址同步的 localStorage 快照（键名带 dsh. 前缀的那些）
+const KEY_LS_SNAPSHOT: string = 'ls_sync';
+
 const DAV_DIR: string = '/DSH/Dsh_zhandian';
 const DAV_FILE: string = '/dsh-sites.json';
 const KEY_DAV_URL: string = 'dav_url';
@@ -79,6 +82,8 @@ interface ShellBridge {
   setOverlay: (v: number) => void;
   // 自建文件查看器的开合状态（返回键/侧滑据此先关它）
   setFileFix: (v: number) => void;
+  // 把网页里的 dsh.* localStorage 快照存回原生（跨地址同步用）
+  saveLs: (s: string) => void;
   setDialog: (v: number) => void;
   getCurLabel: () => string;
   openSwitcher: () => void;
@@ -159,6 +164,8 @@ struct Index {
   @State webConsoleErr: string = '';
   // 自建文件查看器是否开着
   @State fileFixOpen: boolean = false;
+  // 文档期注入的 localStorage 种子脚本（每次导航前按最新快照重建）
+  @State lsSeedJs: string = '(function(){})()';
   // 从安装包读出的版本号（形如 v1.0.12 (1000012)）——用于让用户核对装的是哪一版
   @State verText: string = BUILD_TAG;
   // 网页增强总开关：置 false 可完全停掉所有注入，用来判断"是不是我的注入引起的"
@@ -536,7 +543,9 @@ struct Index {
     }
     setTimeout(() => {
       try {
-        this.controller.loadUrl(items[i].url);
+        // 导航前按最新快照重建种子脚本（后写覆盖）
+      this.prepareLsSeed();
+      this.controller.loadUrl(items[i].url);
       } catch (e) {
       }
     }, 60);
@@ -1346,6 +1355,60 @@ struct Index {
   //   · 等得太久 → 文件树点击时立刻预取（轮询 100ms）
   //   · 侧滑关闭 → 左边缘起滑 + 系统返回键（经 setFileFix 上报开合状态）
   //   · 关闭查看器时也再收一次报错页签，并延迟 350ms 重试
+  // ── 跨地址同步 DSH 客户端设置 ──────────────────────────────────
+  // 背景：DSH 把客户端状态存在 localStorage、键名统一带 `dsh.` 前缀
+  //   （dsh.sessions.current / dsh.workspace.view.v5 / dsh.conversation.* …），
+  //   而 **localStorage 按 origin 隔离** —— 同一个服务器用不同地址
+  //   （局域网 IP / ZeroTier / 路由器转发）访问时就是三套互不相通的设置。
+  //   用户确认的策略：**后写的覆盖**。
+  readLsSnapshot(): string {
+    try {
+      if (this.store !== null) {
+        const s = this.store.getSync(KEY_LS_SNAPSHOT, '') as string;
+        if (s && s.length > 2) {
+          return s;
+        }
+      }
+    } catch (e) {
+    }
+    return '';
+  }
+
+  writeLsSnapshot(s: string): void {
+    try {
+      if (this.store !== null && s && s.length > 2 && s.length < 400000) {
+        this.store.putSync(KEY_LS_SNAPSHOT, s);
+        this.store.flush();
+      }
+    } catch (e) {
+    }
+  }
+
+  // 构造"文档开始时就执行"的种子脚本：把最新快照**覆盖**写入当前 origin。
+  // 必须走 javaScriptOnDocumentStart —— DSH 在脚本一加载就读 dsh.* ，
+  // 等 onPageEnd 再注入就太晚了。
+  buildLsSeed(): string {
+    const snap = this.readLsSnapshot();
+    if (snap.length < 3) {
+      return '(function(){})()';
+    }
+    try {
+      JSON.parse(snap);
+    } catch (e) {
+      return '(function(){})()';
+    }
+    return 'try{(function(){var __o=' + snap + ';'
+      + 'for(var __k in __o){if(Object.prototype.hasOwnProperty.call(__o,__k)){'
+      + 'localStorage.setItem(__k,__o[__k]);}}})()}catch(e){}';
+  }
+
+  // 每次导航前刷新种子（后写的覆盖：快照里就是"最后被改动"的那份）
+  prepareLsSeed(): void {
+    try {
+      this.lsSeedJs = this.buildLsSeed();
+    } catch (e) {
+    }
+  }
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
       + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="";'
@@ -1733,7 +1796,20 @@ struct Index {
 
   injectAll(): void {
     // 自建文件查看器：始终启用（这是"文件打不开"的兜底，不受诊断开关影响）
-    this.injectFileFix();
+    // ㊫ 把网页里的 dsh.* localStorage 快照存回原生 —— 跨地址（不同 origin）同步 DSH 客户端设置。
+    // 与「文档期种子脚本」(javaScriptOnDocumentStart) 配对：那边负责写进去，这边负责收回来。
+    this.js('(function(){if(window.__dshLs){return;}window.__dshLs=1;'
+      + 'var K="dsh.";'
+      + 'function collect(){var o={};try{for(var i=0;i<localStorage.length;i++){'
+      + 'var k=localStorage.key(i);if(k&&k.indexOf(K)===0)o[k]=localStorage.getItem(k);}}catch(e){}return o;}'
+      + 'var t=null;'
+      + 'function push(){if(t)clearTimeout(t);t=setTimeout(function(){try{'
+      + 'window.dshShell.saveLs(JSON.stringify(collect()));}catch(e){}},1000);}'
+      + 'try{var P=Storage.prototype,si=P.setItem,ri=P.removeItem,cl=P.clear;'
+      + 'P.setItem=function(k,v){si.apply(this,arguments);if(String(k).indexOf(K)===0)push();};'
+      + 'P.removeItem=function(k){ri.apply(this,arguments);if(String(k).indexOf(K)===0)push();};'
+      + 'P.clear=function(){cl.apply(this,arguments);push();};}catch(e){}'
+      + 'push();setInterval(push,20000);})()');    this.injectFileFix();
     if (!this.injectEnabled) {
       return;
     }
@@ -1907,6 +1983,10 @@ struct Index {
       // 自建文件查看器上报开合状态（返回键/侧滑据此先关它）
       setFileFix: (v: number): void => {
         this.fileFixOpen = (v === 1);
+      },
+      // 把网页里的 dsh.* localStorage 快照存回原生（跨地址同步用，"后写覆盖"）
+      saveLs: (s: string): void => {
+        this.writeLsSnapshot(s);
       },
       // 网页只上报"当前是不是深色"（由侧栏底色亮度算出）。
       // 不再上报具体配色，也不再上报侧栏宽度 —— 状态栏已改成一条纯色条。
@@ -3085,6 +3165,19 @@ struct Index {
         Web({ src: EMPTY_URL, controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(true)
+        // 文档**开始**时就把 localStorage 快照写进去 —— DSH 一加载就读 dsh.*，
+        // 等 onPageEnd 再注入就太晚了。脚本内容由 lsSeedJs 提供（每次导航前刷新）。
+        .javaScriptOnDocumentStart([{ script: this.lsSeedJs, scriptRules: ['*'] }])
+        // 声明系统软键盘的回车键类型为「发送」。
+        // 小艺输入法的「长按发送键换行」依赖这个声明：不声明时点按与长按发出的事件相同，
+        // 网页无从区分（用户实测两者都是发送）；声明为发送键后，长按即由输入法转换为换行。
+        .onInterceptKeyboardAttach((info: WebKeyboardCallbackInfo) => {
+          const opts: WebKeyboardOptions = {
+            useSystemKeyboard: true,
+            enterKeyType: inputMethod.EnterKeyType.SEND
+          };
+          return opts;
+        })
         .imageAccess(true)
         .fileAccess(true)
         .mediaPlayGestureAccess(true)
@@ -3093,7 +3186,7 @@ struct Index {
         .javaScriptProxy({
           object: this.buildBridge(),
           name: 'dshShell',
-          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
+          methodList: ['getGroups', 'getCurrent', 'saveGroups', 'switchTo', 'getSafeTop', 'getSafeBottom', 'log', 'openSites', 'setOverlay', 'setFileFix', 'saveLs', 'setDark', 'setDialog', 'getCurLabel', 'openSwitcher', 'dbg'],
           controller: this.controller
         })
         .onHttpAuthRequest((event: OnHttpAuthRequestEvent) => {
