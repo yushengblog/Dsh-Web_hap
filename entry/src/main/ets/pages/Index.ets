@@ -27,7 +27,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v10-01-3712'
+const BUILD_TAG: string = '构建 v1.1.20'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -247,6 +247,13 @@ struct Index {
   private davReady: boolean = false;   // 配置读完之前不触发自动备份
 
   aboutToAppear(): void {
+    // 开启 ArkWeb 网页调试：配合 hdc fport tcp:9222 tcp:9222 + 电脑浏览器 edge://inspect，
+    // 可以直接看手机上 WebView 的真实 DOM，排查注入类问题时比反复改代码装包快得多。
+    // 只影响调试能力，不影响正常功能。
+    try {
+      webview.WebviewController.setWebDebuggingAccess(true);
+    } catch (e) {
+    }
     this.readVersion();
     this.loadStore();
     this.measureSafeArea();
@@ -1682,7 +1689,9 @@ struct Index {
   }
   injectFileFix(): void {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
-      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="",docDone="";'
+      // seenAbs：文件名 → 见过的绝对路径（内存表）。lastRoot：见过的根目录。
+      // 为什么需要它们见 absOf 里的说明（真机实测：点开文件约 300ms 后文件树就被 DSH 卸载了）。
+      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="",docDone="",seenAbs={},lastRoot=null;'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1704,14 +1713,27 @@ struct Index {
       //   → 拼出 `/api/file?path=测试.docx`（只有文件名）→ DSH 返回 **HTTP 400**。
       //   而**文件树的每一行带 data-files-path，它就是绝对路径**（电脑上实测形如
       //   `D:\deepseek/browser-mcp/out/aa1.jpeg`）→ 按文件名反查即可。
+      // ★★v1.1.20 真机 CDP 时间线取到的**真正根因**（见 README 坑 100/101）：
+      //   点开文件后约 300ms，DSH 会把右侧栏从「文件」切到预览页签，
+      //   于是 [data-files-entry=file]、[data-files-root]、[data-path-label] **同时从 DOM 消失**。
+      //   本函数原来只在"现场查 DOM"→ 三者全落空 → 返回 null → 调用方退回相对路径 → HTTP 400。
+      //   修法：优先用**点击那一刻**就已经抓到的绝对路径（lastPath / seenAbs 内存表），
+      //   并把见过的根目录记住（lastRoot），不再只依赖现场 DOM。
+      + 'try{var __c=[lastPath,lastUsed];for(var __ci=0;__ci<__c.length;__ci++){var __cv=__c[__ci];'
+      + 'if(__cv&&/^[a-zA-Z]:[\\\\\\\\/]/.test(String(__cv))&&base(String(__cv))===base(p))return String(__cv);}}catch(e){}'
+      + 'try{if(seenAbs[base(p)])return seenAbs[base(p)];}catch(e){}'
       + 'try{var __rows=document.querySelectorAll("[data-files-entry=file]");'
       + 'for(var __ri=0;__ri<__rows.length;__ri++){var __fp=__rows[__ri].getAttribute("data-files-path");'
+      + 'if(__fp){try{seenAbs[base(__fp)]=__fp;}catch(e5){}}'
       + 'if(__fp&&/^[a-zA-Z]:[\\\\\\\\/]/.test(__fp)&&base(__fp)===base(p))return __fp;}}catch(e){}'
       + 'var root=null;'
       + 'try{var r=document.querySelector("[data-files-root]");if(r)root=r.getAttribute("data-files-root");}catch(e){}'
+      + 'if(root)lastRoot=root;'
       + 'if(!root){try{var l=document.querySelectorAll("[data-path-label]");'
       + 'for(var i=0;i<l.length;i++){var tt=(l[i].innerText||"").trim();'
       + 'if(/^[a-zA-Z]:\\\\/.test(tt)){var s=tt.substring(0,tt.lastIndexOf("\\\\"));if(s)root=s;}}}catch(e){}}'
+      + 'if(root)lastRoot=root;'
+      + 'if(!root)root=lastRoot;'
       + 'if(!root)return null;'
       + 'return String(root).replace(/[\\\\/]+$/,"")+"\\\\"+p;}'
       // ── 图片查看器（带缩放 —— 官方那个不能放大，这里补上）──
@@ -1784,8 +1806,12 @@ struct Index {
       + 'try{var l=document.querySelectorAll("[data-path-label]");'
       + 'for(var j=0;j<l.length;j++)c.push((l[j].innerText||"").trim());}catch(e){}'
       + 'if(lastPath)c.push(lastPath);if(lastUsed)c.push(lastUsed);'
+      // ★v1.1.20：优先返回**绝对路径**的候选。
+      //   原来按顺序 return 第一个 isDoc 的候选，而候选表里第一个常常是
+      //   [data-dockkit-tab] 的页签标题（只有文件名，相对路径）→ 下游拼 URL 直接 400。
+      + 'var first=null;'
       + 'for(var k=0;k<c.length;k++){var s=c[k];if(!s)continue;'
-      + 'if(isDoc(s))return s;}return null;}'
+      + 'if(isDoc(s)){if(/^[a-zA-Z]:[\\\\\\\\/]/.test(s))return s;if(!first)first=s;}}return first;}'
       // office/pdf 的占位页：文件名 + 类型 + 「用系统应用打开」
       + 'function renderOpenWith(path){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
@@ -1796,7 +1822,10 @@ struct Index {
       //    （页签标题就是相对的文件名，直接拿来拼 URL 会踩这个坑）
       + 'var abs=null;'
       + 'try{var cl=candidates();for(var ci=0;ci<cl.length;ci++){var cs=cl[ci];'
-      + 'if(cs&&/^[a-zA-Z]:[\\/]/.test(cs)&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
+      // ⚠️ 正则要写 [\\/]（反斜杠或斜杠）。原来这里写的是 [\/]，在 JS 里等价于只匹配**正斜杠**，
+      //    于是 `D:\deepseek/_doctest/测试.docx` 这种候选被全部丢掉 —— Windows 路径永远匹配不上。
+      //    ArkTS 单引号串里 `\\` 只得到 1 个反斜杠，要生成 JS 的 `\\` 必须写 4 个 `\\\\`。
+      + 'if(cs&&/^[a-zA-Z]:[\\\\\\\\/]/.test(cs)&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
       + 'if(!abs)abs=absOf(path);if(!abs)abs=path;'
       + 'var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
@@ -2190,7 +2219,11 @@ struct Index {
       + 'if(n>25||document.querySelector("[data-textpreview-state=text]")){clearInterval(timer);timer=null;}},100);}'
       + 'document.addEventListener("click",function(e){try{var n=e.target;while(n&&n!==document){'
       + 'if(n.getAttribute&&n.getAttribute("data-files-entry")==="file"&&n.getAttribute("data-files-path")){'
-      + 'lastPath=n.getAttribute("data-files-path");prefetch=null;'
+      + 'lastPath=n.getAttribute("data-files-path");'
+      // ★v1.1.20：点击这一刻是**唯一**能拿到绝对路径的时机（约 300ms 后文件树就被卸载），
+      //   所以立刻记进内存表 seenAbs，供之后 absOf 反查。
+      + 'try{seenAbs[base(lastPath)]=lastPath;}catch(x2){}'
+      + 'prefetch=null;'
       + 'rd(lastPath,1,function(v){prefetch=v;});'
       + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
       // ★兜底总闸：任何入口触发的错误都接管
@@ -3857,6 +3890,13 @@ struct ThresholdDialog {
   @State text: string = '200';
 
   aboutToAppear(): void {
+    // 开启 ArkWeb 网页调试：配合 hdc fport tcp:9222 tcp:9222 + 电脑浏览器 edge://inspect，
+    // 可以直接看手机上 WebView 的真实 DOM，排查注入类问题时比反复改代码装包快得多。
+    // 只影响调试能力，不影响正常功能。
+    try {
+      webview.WebviewController.setWebDebuggingAccess(true);
+    } catch (e) {
+    }
     this.text = String(this.cur);
   }
 
