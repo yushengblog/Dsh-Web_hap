@@ -27,7 +27,7 @@ const PHASE_WEB: number = 2;
 const INJECT_ENABLED: boolean = true;
 
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v1.1.21'
+const BUILD_TAG: string = '构建 v1.1.22'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -1691,7 +1691,13 @@ struct Index {
     this.js('(function(){if(window.__dshFf){return;}window.__dshFf=1;'
       // seenAbs：文件名 → 见过的绝对路径（内存表）。lastRoot：见过的根目录。
       // 为什么需要它们见 absOf 里的说明（真机实测：点开文件约 300ms 后文件树就被 DSH 卸载了）。
-      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="",docDone="",seenAbs={},lastRoot=null;'
+      // lastRel：**最近一次点击的"文件提及"里的完整路径**（形如 dsh-shell\shots\t9.jpeg）。
+      // 为什么必须有它（v1.1.22 真机实测踩到的）：页签标题只有**文件名**，
+      // 而 readBytes 对**纯文件名会直接失败**：
+      //     t9.jpeg              → Failed to fetch ✗
+      //     dsh-shell\shots\t9.jpeg → 正常回 absolutePath ✓
+      // 只有"点击那一刻"，DSH 的文件提及按钮上还留着完整路径，之后就被换成了页签标题。
+      + 'var timer=null,lastPath=null,lastUsed=null,prefetch=null,shown=false,errSig="",imgDone="",docDone="",seenAbs={},lastRoot=null,lastRel=null;'
       + 'function getScope(){try{'
       + 'var el=document.querySelector("[data-sidebar-right-session]")||document.querySelector("[data-conversation-session]");'
       + 'if(el)return el.getAttribute("data-sidebar-right-session")||el.getAttribute("data-conversation-session");'
@@ -1739,13 +1745,44 @@ struct Index {
       // ── 图片查看器（带缩放 —— 官方那个不能放大，这里补上）──
       // 字节直接用 DSH 自己的接口：<img src="/api/file?path=<绝对路径 urlencode>">
       // （实测：200 / Content-Type: image/jpeg / 字节数与原文件一致）
+      // ★★v1.1.22：新增 rbMeta() —— 用 DSH 自己的 workspaceFiles/readBytes 反查**绝对路径**。
+      //   为什么需要它：对话里的文件提及是**相对路径**（如 `dsh-shell\shots\t9.jpeg`），
+      //   而 /api/file?path= 必须绝对路径；当用户从没开过文件树时，
+      //   [data-files-root]/[data-path-label]/文件树行 全都没有 → absOf() 返回 null
+      //   → <img src="/api/file?path=t9.jpeg"> → 加载失败（真机实测复现）。
+      //   真机实测确认的接口形状（§坑 118）：
+      //     POST /api/workspaceFiles/readBytes
+      //     信封 {type:"client-request",rpcId,method:"workspaceFiles/readBytes",
+      //           payload:{args:{workspaceFileScopeId,path,options}}}
+      //     ⚠️ 参数名是 options（不是 range）；分页是 options.range.{offset,length}（limit 会被忽略）
+      //     ⚠️ 返回是 multipart/form-data：bytes-0 是二进制，metadata 是 JSON 字符串
+      //     ✅ metadata.value 里有 absolutePath + bytes(总大小) + offset + eof
+      //   这里只要 1 个字节，纯粹为了换 absolutePath —— 拿到后仍走已验证的 /api/file 下载。
+      + 'function rbMeta(path,cb){try{'
+      + 'var sc=getScope();if(!sc){cb(null);return;}'
+      + 'var body=JSON.stringify({type:"client-request",rpcId:"ffb-"+Date.now()+"-"+Math.random().toString(36).slice(2),'
+      + 'method:"workspaceFiles/readBytes",'
+      + 'payload:{args:{workspaceFileScopeId:sc,path:path,options:{range:{offset:0,length:1}}}}});'
+      + 'fetch("/api/workspaceFiles/readBytes",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:body})'
+      + '.then(function(r){return r.formData();})'
+      + '.then(function(fd){var md=fd.get("metadata");var j=(typeof md==="string")?JSON.parse(md):null;'
+      + 'var v=j&&j.result&&j.result.value;'
+      + 'if(v&&v.absolutePath){try{seenAbs[base(path)]=v.absolutePath;}catch(e){}}'
+      + 'cb(v||null);})'
+      + '.catch(function(e){cb(null);});'
+      + '}catch(e){cb(null);}}'
+      // 绝对路径优先（/api/file 已验证、性能好）；拿不到才用 readBytes 反查
       + 'function renderImage(path){'
+      + 'path=relOf(path);'
+      + 'var a=absOf(path);'
+      + 'if(a&&ISABS(a)){renderImageAt(path,a);return;}'
+      + 'rbMeta(path,function(v){renderImageAt(path,(v&&v.absolutePath)||a||path);});}'
+      + 'function renderImageAt(path,abs){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
       + 'var dk=dark();'
       + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
       + 'hb=dk?"#1b1b1c":"#f9fafb",sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5";'
       + 'var mono="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";'
-      + 'var abs=absOf(path)||path;'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
       + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
       + 'var bar=document.createElement("div");'
@@ -1823,22 +1860,25 @@ struct Index {
       + 'for(var k=0;k<c.length;k++){var s=c[k];if(!s)continue;'
       + 'if(isDoc(s)){if(ISABS(s))return s;if(!first)first=s;}}return first;}'
       // office/pdf 的占位页：文件名 + 类型 + 「用系统应用打开」
+      // ★v1.1.22：这里拆成"先解析绝对路径 → 再渲染"。
+      //   解析顺序：① 现场候选里同名且绝对的 ② absOf() ③ 都拿不到 → rbMeta() 用 readBytes 反查。
+      //   （对话里第一次打开、文件树里从没见过的 office 文件就靠第 ③ 条拿到绝对路径）
       + 'function renderOpenWith(path){'
+      + 'path=relOf(path);'
+      + 'var abs=null;var want=base(path);'
+      + 'try{var cl=candidates();for(var ci=0;ci<cl.length;ci++){var cs=cl[ci];'
+      + 'if(cs&&ISABS(cs)&&base(cs)===want&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
+      + 'if(!abs)abs=absOf(path);'
+      + 'if(abs&&ISABS(abs)){renderOpenWithAt(path,abs);return;}'
+      + 'rbMeta(path,function(v){renderOpenWithAt(path,(v&&v.absolutePath)||absOf(path)||abs||path);});}'
+      + 'function renderOpenWithAt(path,abs){'
       + 'var old=document.getElementById("dsh-filefix");if(old&&old.parentNode)old.parentNode.removeChild(old);'
       + 'var dk=dark();'
       + 'var bg=dk?"#151517":"#ffffff",fg=dk?"#e6e6e9":"#1f1f1f",bd=dk?"#2e2e34":"#e5e5e5",'
       + 'sub=dk?"#a6a6ae":"#6b6b6b",bt=dk?"#26262b":"#f2f3f5",ac=dk?"#4c8dff":"#2f6fed";'
-      // ⚠️ 必须用**绝对路径**：实测 /api/file?path= 收到相对路径会返回 HTTP 400
-      //    （页签标题就是相对的文件名，直接拿来拼 URL 会踩这个坑）
       // ★v1.1.21：绝对路径候选必须与"用户点的那个文件"**同名**。
       //   否则 lastPath 里的旧文件会把新点的文件顶掉（真机复现：点 xlsx 弹出 docx）。
-      + 'var abs=null;var want=base(path);'
-      + 'try{var cl=candidates();for(var ci=0;ci<cl.length;ci++){var cs=cl[ci];'
-      // ⚠️ 正则要写 [\\/]（反斜杠或斜杠）。原来这里写的是 [\/]，在 JS 里等价于只匹配**正斜杠**，
-      //    于是 `D:\deepseek/_doctest/测试.docx` 这种候选被全部丢掉 —— Windows 路径永远匹配不上。
-      //    ArkTS 单引号串里 `\\` 只得到 1 个反斜杠，要生成 JS 的 `\\` 必须写 4 个 `\\\\`。
-      + 'if(cs&&/^[a-zA-Z]:[\\\\\\\\/]/.test(cs)&&base(cs)===want&&isDoc(cs)){abs=cs;break;}}}catch(e){}'
-      + 'if(!abs)abs=absOf(path);if(!abs)abs=path;'
+      //   （v1.1.22 起这段解析已上移到 renderOpenWith 外壳里）
       + 'var nm=base(abs);var ext=(nm.split(".").pop()||"").toUpperCase();'
       + 'var w=document.createElement("div");w.id="dsh-filefix";'
       + 'w.style.cssText="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;";'
@@ -2243,6 +2283,19 @@ struct Index {
       + 'prefetch=null;'
       + 'rd(lastPath,1,function(v){prefetch=v;});'
       + 'watchFast();break;}n=n.parentElement;}}catch(x){}},true);'
+      // ★v1.1.22：再挂一个"记录文件提及完整路径"的捕获监听。
+      //   点击 DSH 的文件提及按钮（工具行 button.fileLink / @提及 data-ref-chip）时，
+      //   按钮上还留着完整路径（如 dsh-shell\shots\t9.jpeg）；等预览页签建好就只剩文件名了。
+      //   记下来后，renderImage/renderOpenWith 用 relOf() 换回完整路径，
+      //   absOf 的"根目录拼接"或 rbMeta 的 readBytes 才能算出正确的绝对路径。
+      + 'document.addEventListener("click",function(e){try{var n=e.target;while(n&&n!==document){'
+      + 'if(n.tagName==="BUTTON"){var t=(n.textContent||"").trim();'
+      + 'var ti=n.getAttribute?n.getAttribute("title"):null;'
+      + 'var c=(ti&&ti.indexOf("/")<0&&ti.indexOf("\\\\")>=0)?ti:t;'
+      + 'if(c&&c.length<300&&(c.indexOf("/")>=0||c.indexOf("\\\\")>=0)&&/\\.[A-Za-z0-9]{1,6}$/.test(c)){lastRel=c;break;}}'
+      + 'n=n.parentElement;}}catch(x){}},true);'
+      // 若"最近点过的文件"与当前要渲染的是同一个（同名），就用它换回完整路径；否则原样返回
+      + 'function relOf(p){try{if(p&&lastRel&&base(lastRel)===base(String(p)))return lastRel;}catch(e){}return p;}'
       // ★兜底总闸：任何入口触发的错误都接管
       // 接"上下文图片被点击"的通知，**立刻**渲染（文档期脚本拦的，官方不会打开）
       + 'function wantImg(p){try{if(!p||!isImg(p))return;'
