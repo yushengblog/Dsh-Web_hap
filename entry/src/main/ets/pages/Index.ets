@@ -26,8 +26,14 @@ const PHASE_WEB: number = 2;
 //         （实测：手机自带浏览器功能正常、本 App 不正常 → 先靠这个开关一刀切开）
 const INJECT_ENABLED: boolean = true;
 
+// 进入页面 / 切换会话时，是否"主动把网页输入框失焦 + 收起输入法"。
+// 旧版默认开启：DSH 会把焦点丢进输入框并弹起输入法，我们就立刻失焦、并延迟 250ms / 700ms 再各失焦一次。
+// 真机实测副作用：输入法**弹来弹去**（DSH 又聚焦 → 我们再失焦 → 反复），所以默认关闭。
+// 需要"进会话别自动弹键盘"时，把这里改回 true。
+const AUTO_DISMISS_KEYBOARD: boolean = false;
+
 const EMPTY_URL: string = 'about:blank';
-const BUILD_TAG: string = '构建 v1.1.22'
+const BUILD_TAG: string = '构建 v1.1.23'
 
 // ── WebDAV 站点备份 ────────────────────────────────────────────────
 // 备份目录固定为 <WebDAV 根>/DSH/Dsh_zhandian（首次备份时自动 MKCOL 创建）。
@@ -637,7 +643,8 @@ struct Index {
     return g.name + ' / ' + nm + '   ' + a.url;
   }
 
-  // 进入/切换会话时 DSH 会把焦点丢进输入框并自动唤起输入法；这里主动失焦 + 收起输入法。
+  // 主动把网页输入框失焦 + 收起输入法。
+  // ⚠️ 只在 AUTO_DISMISS_KEYBOARD = true 时才会被调用（默认关闭，因为它会让输入法弹来弹去）。
   // 只 stopInputSession 不够：那只是收起键盘，输入框仍聚焦、手指一碰又弹。
   dismissKeyboard(): void {
     try {
@@ -3758,21 +3765,26 @@ struct Index {
           }
         })
         .onTitleReceive((event) => {
-          // 标题变化 = 切换了会话。DSH 这时会自动聚焦输入框并弹输入法，我们立刻并延迟各收一次，
-          // 因为它的聚焦动作可能发生在我们之后。
-          this.dismissKeyboard();
-          setTimeout(() => {
+          // 标题变化 = 切换了会话。旧版会在这里"立刻 + 250ms + 700ms"各失焦一次，
+          // 用来对抗 DSH 自动聚焦输入框并弹起输入法；真机实测这会让输入法弹来弹去，
+          // 默认已关闭（见 AUTO_DISMISS_KEYBOARD）。需要时把那个开关改成 true。
+          if (AUTO_DISMISS_KEYBOARD) {
             this.dismissKeyboard();
-          }, 250);
-          setTimeout(() => {
-            this.dismissKeyboard();
-          }, 700);
+            setTimeout(() => {
+              this.dismissKeyboard();
+            }, 250);
+            setTimeout(() => {
+              this.dismissKeyboard();
+            }, 700);
+          }
         })
         .onProgressChange((event) => {
           // 判定要"宽进"：之前要求 100% 且 !loadFailed，导致 https+认证类站点被误判成
           // "一直转圈→连不上"，而页面其实早就显示出来了（用户侧滑返回能看到真实状态）。
           if (event && event.newProgress >= 90) {
-            this.dismissKeyboard();
+            if (AUTO_DISMISS_KEYBOARD) {
+              this.dismissKeyboard();
+            }
             if (this.phase === PHASE_LOADING) {
               this.markLink(this.curG, this.curI, 'ok');
               this.phase = PHASE_WEB;
