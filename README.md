@@ -1,5 +1,22 @@
 # Dsh-Web_hap
 
+## ⛔ 打包铁律（2026-10-16 起，最高优先级）：禁止签名打包
+
+**用户口径：打包不许签名。** 一律遵守，不再讨论：
+
+1. `build-profile.json5` **永远**保持 `"signingConfigs": []`；products 里**不许**出现 `"signingConfig": "default"`。
+2. **禁止**在 DevEco 点「自动生成签名」；**禁止**从 `.hvigor\outputs\sync\output.json` 把签名块（certpath / profile / storeFile / 口令）恢复回工程；**禁止**用 `git update-index --skip-worktree` 藏签名配置。
+3. 产物固定就是一个：`entry/build/default/outputs/default/entry-default-unsigned.hap`（**未签名**）。
+4. 打包命令就是 `hvigorw assembleHap --no-daemon` —— 无签名也能 BUILD SUCCESSFUL（`PackageHap` 跑完，`SignHap` 空过）。
+   实测：2026-10-16 15:32，778,567 字节，BUILD SUCCESSFUL。
+5. **装机用 HOKIT**（第三方安装器）装未签名包。`hdc install` 装未签名包会报
+   `code:9568320 error: no signature file` —— 这是**预期行为，不是故障**，不要为此去补签名。
+6. **发版只发未签名包**（签名包里含设备 UDID 白名单等隐私，绝不能上传公开仓库）。
+7. 如果历史上不小心补过签名：`git checkout -- build-profile.json5`
+   + `git update-index --no-skip-worktree build-profile.json5`，并**删掉** `entry-default-signed.hap`。
+
+
+
 **Dsh 鸿蒙版** —— 一个 HarmonyOS（ArkTS + ArkWeb）的 **WebView 多站点壳应用**，
 把多个自建 Web 系统装进一个 App 里，快速切换、自动登录、并为折叠屏做了适配。
 
@@ -115,12 +132,12 @@ hvigorw assembleHap --no-daemon
 # 产物：entry/build/default/outputs/default/entry-default-unsigned.hap
 ```
 
-**关于签名**：本仓库的 `build-profile.json5` **不含签名配置**，因此构建产物是**未签名**的
-（`signingConfigs: []`），与发布包一致。这既保证了仓库里不含任何证书材料，
-也让"仓库里的代码"与"发布的包"能一一对应。
+**关于签名（⛔ 禁止签名打包）**：`build-profile.json5` 永远保持 `"signingConfigs": []`，
+构建产物就是**未签名**的 `entry-default-unsigned.hap`。
 
-如需在真机上用 `hdc install` 安装，请自行用 DevEco Studio 的
-*File → Project Structure → Signing Configs* 自动签名（需要你的华为账号与设备白名单）。
+**禁止**：在 DevEco 里做「自动签名」、从 `.hvigor\outputs\sync\output.json` 恢复签名块、
+用 `skip-worktree` 藏签名配置。**装机**：用 **HOKIT** 装未签名包
+（`hdc install` 会报 `no signature file`，这是预期，不要为此补签名）。详见文首【打包铁律】。
 
 > ⚠️ **改注入脚本后请务必先做语法检查**：`injectFileFix()` 等函数里的注入 JS 是
 > 以 ArkTS 字符串拼接的，**编译器不校验其内容** —— JS 语法错了照样编译通过，
